@@ -1,6 +1,5 @@
 import html
 import os
-import secrets
 import sqlite3
 from datetime import datetime
 from http import cookies
