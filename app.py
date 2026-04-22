@@ -353,7 +353,10 @@ def render_entry_form(values, action, submit_label, errors=None):
       </label>
       <fieldset>
         <legend>演者</legend>
-        {artist_fields}
+        <div id="artist-fields">
+          {artist_fields}
+        </div>
+        <button type="button" class="secondary-button" data-add-artist>演者を追加</button>
         <p class="hint">回数を空欄にすると自動計算します。数値を入れるとその回を基準に以後の回数もつながります。</p>
       </fieldset>
       <fieldset>
@@ -366,6 +369,23 @@ def render_entry_form(values, action, submit_label, errors=None):
       </label>
       <button type="submit">{esc(submit_label)}</button>
     </form>
+    <template id="artist-row-template">
+      <div class="artist-row">
+        <input name="artists" value="" placeholder="演者名">
+        <input name="artist_seen_counts" value="" placeholder="何回目か(任意)" inputmode="numeric">
+      </div>
+    </template>
+    <script>
+      (() => {{
+        const addButton = document.querySelector('[data-add-artist]');
+        const artistFields = document.querySelector('#artist-fields');
+        const template = document.querySelector('#artist-row-template');
+        if (!addButton || !artistFields || !template) return;
+        addButton.addEventListener('click', () => {{
+          artistFields.appendChild(template.content.firstElementChild.cloneNode(true));
+        }});
+      }})();
+    </script>
     """
 
 
@@ -684,8 +704,8 @@ def page_new_entry(environ, start_response, values=None, errors=None):
         "blog_url": "",
         "flickr_url": "",
         "notes": "",
-        "artists": ["", "", ""],
-        "artist_seen_counts": ["", "", ""],
+        "artists": [""],
+        "artist_seen_counts": [""],
         "purchase_names": ["", "", ""],
         "purchase_urls": ["", "", ""],
         "purchase_notes": ["", "", ""],

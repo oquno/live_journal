@@ -155,6 +155,12 @@ main.wrap {
   display: inline-block;
 }
 
+.secondary-button {
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+}
+
 .danger {
   background: var(--danger);
 }
