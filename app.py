@@ -3,7 +3,7 @@ import os
 import sqlite3
 from datetime import datetime
 from http import cookies
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote, unquote
 from wsgiref.simple_server import make_server
 
 
@@ -109,6 +109,21 @@ def all_values(params, key):
 
 def esc(value):
     return html.escape("" if value is None else str(value), quote=True)
+
+
+def url_path_segment(value):
+    return quote("" if value is None else str(value), safe="")
+
+
+def decode_path_segment(value):
+    if value is None:
+        return ""
+    if "%" in value:
+        return unquote(value)
+    try:
+        return value.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return value
 
 
 def parse_cookies(environ):
@@ -236,7 +251,7 @@ def render_entry_card(row):
   <div class="card-head">
     <div>
       <h2><a href="/entries/{row['id']}">{title}</a></h2>
-      <p class="muted">{esc(row['event_date'])} / <a href="/venues/{esc(row['venue_slug'])}">{esc(row['venue_name'])}</a></p>
+      <p class="muted">{esc(row['event_date'])} / <a href="/venues/{url_path_segment(row['venue_slug'])}">{esc(row['venue_name'])}</a></p>
     </div>
   </div>
   <p>{esc(artists)}</p>
@@ -518,7 +533,7 @@ def list_entries(conn, params):
         where = "WHERE " + " AND ".join(clauses)
     return conn.execute(
         f"""
-        SELECT e.id, e.event_date, e.title, e.notes, v.name AS venue_name, v.slug AS venue_slug,
+        SELECT e.id, e.event_date, e.title, e.notes, e.venue_id, v.name AS venue_name, v.slug AS venue_slug,
                GROUP_CONCAT(a.name, '||') AS artist_names
         FROM entries e
         JOIN venues v ON v.id = e.venue_id
@@ -664,7 +679,7 @@ def page_entry_detail(environ, start_response, entry_id):
     artists = "".join(
         f"""
         <li>
-          <a href="/artists/{esc(row['slug'])}">{esc(row['name'])}</a>
+          <a href="/artists/{url_path_segment(row['slug'])}">{esc(row['name'])}</a>
           <span class="pill">{row['seen_count']}回目</span>
           {'<a href="' + esc(row['lastfm_url']) + '" target="_blank" rel="noreferrer">Last.fm</a>' if row['lastfm_url'] else ''}
         </li>
@@ -688,7 +703,7 @@ def page_entry_detail(environ, start_response, entry_id):
     body = f"""
     <article class="single-column">
       <h1>{esc(entry['title'] or '(untitled)')}</h1>
-      <p class="muted">{esc(entry['event_date'])} / <a href="/venues/{esc(entry['venue_slug'])}">{esc(entry['venue_name'])}</a></p>
+      <p class="muted">{esc(entry['event_date'])} / <a href="/venues/{url_path_segment(entry['venue_slug'])}">{esc(entry['venue_name'])}</a></p>
       {actions}
       <section>
         <h2>演者</h2>
@@ -757,17 +772,20 @@ def handle_delete_entry(environ, start_response, entry_id):
     return redirect(start_response, "/")
 
 
-def page_artist(environ, start_response, slug):
+def page_artist(environ, start_response, artist_ref):
     if not can_view(environ):
         return redirect(start_response, "/login")
     conn = get_db()
-    artist = conn.execute("SELECT * FROM artists WHERE slug = ?", (slug,)).fetchone()
+    if str(artist_ref).isdigit():
+        artist = conn.execute("SELECT * FROM artists WHERE id = ?", (int(artist_ref),)).fetchone()
+    else:
+        artist = conn.execute("SELECT * FROM artists WHERE slug = ?", (artist_ref,)).fetchone()
     if artist is None:
         conn.close()
         return response_not_found(start_response)
     rows = conn.execute(
         """
-        SELECT e.id, e.title, e.event_date, v.name AS venue_name, v.slug AS venue_slug,
+        SELECT e.id, e.title, e.event_date, e.venue_id, v.name AS venue_name, v.slug AS venue_slug,
                (
                  SELECT COUNT(*)
                  FROM entry_artists ea2
@@ -790,7 +808,7 @@ def page_artist(environ, start_response, slug):
     ).fetchall()
     conn.close()
     items = "".join(
-        f"<li>{esc(row['event_date'])} / <a href=\"/entries/{row['id']}\">{esc(row['title'] or '(untitled)')}</a> / <a href=\"/venues/{esc(row['venue_slug'])}\">{esc(row['venue_name'])}</a> <span class=\"pill\">{row['seen_count']}回目</span></li>"
+        f"<li>{esc(row['event_date'])} / <a href=\"/entries/{row['id']}\">{esc(row['title'] or '(untitled)')}</a> / <a href=\"/venues/{url_path_segment(row['venue_slug'])}\">{esc(row['venue_name'])}</a> <span class=\"pill\">{row['seen_count']}回目</span></li>"
         for row in rows
     ) or "<li>記録なし</li>"
     body = f"""
@@ -803,11 +821,14 @@ def page_artist(environ, start_response, slug):
     return response_html(start_response, layout(artist["name"], body, environ))
 
 
-def page_venue(environ, start_response, slug):
+def page_venue(environ, start_response, venue_ref):
     if not can_view(environ):
         return redirect(start_response, "/login")
     conn = get_db()
-    venue = conn.execute("SELECT * FROM venues WHERE slug = ?", (slug,)).fetchone()
+    if str(venue_ref).isdigit():
+        venue = conn.execute("SELECT * FROM venues WHERE id = ?", (int(venue_ref),)).fetchone()
+    else:
+        venue = conn.execute("SELECT * FROM venues WHERE slug = ?", (venue_ref,)).fetchone()
     if venue is None:
         conn.close()
         return response_not_found(start_response)
@@ -891,9 +912,9 @@ def application(environ, start_response):
         except ValueError:
             return response_not_found(start_response)
     if len(parts) == 2 and parts[0] == "artists" and method == "GET":
-        return page_artist(environ, start_response, parts[1])
+        return page_artist(environ, start_response, decode_path_segment(parts[1]))
     if len(parts) == 2 and parts[0] == "venues" and method == "GET":
-        return page_venue(environ, start_response, parts[1])
+        return page_venue(environ, start_response, decode_path_segment(parts[1]))
 
     return response_not_found(start_response)
 
