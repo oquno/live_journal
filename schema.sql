@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS entry_artists (
   entry_id INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
   artist_id INTEGER NOT NULL REFERENCES artists(id) ON DELETE RESTRICT,
   billing_order INTEGER NOT NULL DEFAULT 1,
+  seen_count_override INTEGER,
   UNIQUE(entry_id, artist_id)
 );
 

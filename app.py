@@ -34,6 +34,9 @@ def init_db():
     conn = get_db()
     with open(os.path.join(BASE_DIR, "schema.sql"), "r", encoding="utf-8") as f:
         conn.executescript(f.read())
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(entry_artists)").fetchall()}
+    if "seen_count_override" not in columns:
+        conn.execute("ALTER TABLE entry_artists ADD COLUMN seen_count_override INTEGER")
     conn.commit()
     conn.close()
 
@@ -273,26 +276,17 @@ def load_entry(conn, entry_id):
         return None
     artists = conn.execute(
         """
-        SELECT a.id, a.name, a.slug, a.lastfm_url, ea.billing_order,
-               (
-                 SELECT COUNT(*)
-                 FROM entry_artists ea2
-                 JOIN entries e2 ON e2.id = ea2.entry_id
-                 WHERE ea2.artist_id = a.id
-                   AND (
-                     e2.event_date < e.event_date
-                     OR (e2.event_date = e.event_date AND e2.created_at < e.created_at)
-                     OR (e2.event_date = e.event_date AND e2.created_at = e.created_at AND e2.id <= e.id)
-                   )
-               ) AS seen_count
+        SELECT a.id, a.name, a.slug, a.lastfm_url, ea.billing_order, ea.seen_count_override
         FROM entry_artists ea
         JOIN artists a ON a.id = ea.artist_id
-        JOIN entries e ON e.id = ea.entry_id
         WHERE ea.entry_id = ?
         ORDER BY ea.billing_order, a.name
         """,
         (entry_id,),
     ).fetchall()
+    artists = [dict(row) for row in artists]
+    for artist in artists:
+        artist["seen_count"] = compute_seen_count(conn, artist["id"], entry_id)
     purchases = conn.execute(
         "SELECT * FROM purchases WHERE entry_id = ? ORDER BY display_order, id",
         (entry_id,),
@@ -303,6 +297,7 @@ def load_entry(conn, entry_id):
 def render_entry_form(values, action, submit_label, errors=None):
     errors = errors or []
     artist_inputs = values.get("artists", [""])
+    artist_seen_counts = values.get("artist_seen_counts", [""])
     purchase_names = values.get("purchase_names", [""])
     purchase_urls = values.get("purchase_urls", [""])
     purchase_notes = values.get("purchase_notes", [""])
@@ -311,9 +306,18 @@ def render_entry_form(values, action, submit_label, errors=None):
         items = "".join(f"<li>{esc(error)}</li>" for error in errors)
         error_block = f'<div class="flash error"><ul>{items}</ul></div>'
 
-    artist_fields = "".join(
-        f'<input name="artists" value="{esc(name)}" placeholder="演者名" class="stack-input">' for name in artist_inputs
-    )
+    artist_rows = []
+    max_artist_rows = max(len(artist_inputs), len(artist_seen_counts))
+    for idx in range(max_artist_rows):
+        artist_rows.append(
+            f"""
+            <div class="artist-row">
+              <input name="artists" value="{esc(artist_inputs[idx] if idx < len(artist_inputs) else '')}" placeholder="演者名">
+              <input name="artist_seen_counts" value="{esc(artist_seen_counts[idx] if idx < len(artist_seen_counts) else '')}" placeholder="何回目か(任意)" inputmode="numeric">
+            </div>
+            """
+        )
+    artist_fields = "".join(artist_rows)
 
     purchase_rows = []
     max_rows = max(len(purchase_names), len(purchase_urls), len(purchase_notes))
@@ -350,7 +354,7 @@ def render_entry_form(values, action, submit_label, errors=None):
       <fieldset>
         <legend>演者</legend>
         {artist_fields}
-        <p class="hint">空の入力は無視されます。複数演者に対応。</p>
+        <p class="hint">回数を空欄にすると自動計算します。数値を入れるとその回を基準に以後の回数もつながります。</p>
       </fieldset>
       <fieldset>
         <legend>購入物</legend>
@@ -373,7 +377,8 @@ def collect_form_values(params):
         "blog_url": first(params, "blog_url"),
         "flickr_url": first(params, "flickr_url"),
         "notes": first(params, "notes"),
-        "artists": all_values(params, "artists") or [""],
+        "artists": params.get("artists", [""]),
+        "artist_seen_counts": params.get("artist_seen_counts", [""]),
         "purchase_names": params.get("purchase_names", [""]),
         "purchase_urls": params.get("purchase_urls", [""]),
         "purchase_notes": params.get("purchase_notes", [""]),
@@ -396,6 +401,13 @@ def validate_entry_form(values):
         errors.append("演者を 1 件以上入力してください。")
     if len(set(artists)) != len(artists):
         errors.append("同じ演者を重複登録できません。")
+    for count in values.get("artist_seen_counts", []):
+        count = count.strip()
+        if not count:
+            continue
+        if not count.isdigit() or int(count) <= 0:
+            errors.append("何回目かは 1 以上の整数で入力してください。")
+            break
     for field in ("blog_url", "flickr_url"):
         if not url_ok(values[field]):
             errors.append(f"{field} は http/https の URL を入力してください。")
@@ -433,13 +445,22 @@ def save_entry(conn, values, entry_id=None):
         conn.execute("DELETE FROM entry_artists WHERE entry_id = ?", (entry_id,))
         conn.execute("DELETE FROM purchases WHERE entry_id = ?", (entry_id,))
 
-    artists = [name.strip() for name in values["artists"] if name.strip()]
-    for idx, artist_name in enumerate(artists, start=1):
+    artist_names = values["artists"]
+    artist_seen_counts = values.get("artist_seen_counts", [])
+    artist_rows = max(len(artist_names), len(artist_seen_counts))
+    billing_order = 1
+    for idx in range(artist_rows):
+        artist_name = artist_names[idx].strip() if idx < len(artist_names) else ""
+        seen_count_raw = artist_seen_counts[idx].strip() if idx < len(artist_seen_counts) else ""
+        if not artist_name:
+            continue
         artist_id = get_or_create_artist(conn, artist_name)
+        seen_count_override = int(seen_count_raw) if seen_count_raw else None
         conn.execute(
-            "INSERT INTO entry_artists(entry_id, artist_id, billing_order) VALUES (?, ?, ?)",
-            (entry_id, artist_id, idx),
+            "INSERT INTO entry_artists(entry_id, artist_id, billing_order, seen_count_override) VALUES (?, ?, ?, ?)",
+            (entry_id, artist_id, billing_order, seen_count_override),
         )
+        billing_order += 1
 
     names = values["purchase_names"]
     urls = values["purchase_urls"]
@@ -478,11 +499,36 @@ def load_entry_form_values(conn, entry_id):
         "flickr_url": entry["flickr_url"] or "",
         "notes": entry["notes"] or "",
         "artists": [row["name"] for row in loaded["artists"]] or [""],
+        "artist_seen_counts": [str(row["seen_count_override"] or "") for row in loaded["artists"]] or [""],
         "purchase_names": [row["item_name"] or "" for row in loaded["purchases"]] or [""],
         "purchase_urls": [row["item_url"] or "" for row in loaded["purchases"]] or [""],
         "purchase_notes": [row["notes"] or "" for row in loaded["purchases"]] or [""],
     }
     return values
+
+
+def artist_timeline_rows(conn, artist_id):
+    rows = conn.execute(
+        """
+        SELECT ea.entry_id, ea.seen_count_override, e.event_date, e.created_at, e.id
+        FROM entry_artists ea
+        JOIN entries e ON e.id = ea.entry_id
+        WHERE ea.artist_id = ?
+        ORDER BY e.event_date ASC, e.created_at ASC, e.id ASC
+        """,
+        (artist_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def compute_seen_count(conn, artist_id, entry_id):
+    current = 0
+    for row in artist_timeline_rows(conn, artist_id):
+        override = row["seen_count_override"]
+        current = int(override) if override else current + 1
+        if row["entry_id"] == entry_id:
+            return current
+    return None
 
 
 def list_entries(conn, params):
@@ -639,6 +685,7 @@ def page_new_entry(environ, start_response, values=None, errors=None):
         "flickr_url": "",
         "notes": "",
         "artists": ["", "", ""],
+        "artist_seen_counts": ["", "", ""],
         "purchase_names": ["", "", ""],
         "purchase_urls": ["", "", ""],
         "purchase_notes": ["", "", ""],
@@ -786,17 +833,7 @@ def page_artist(environ, start_response, artist_ref):
     rows = conn.execute(
         """
         SELECT e.id, e.title, e.event_date, e.venue_id, v.name AS venue_name, v.slug AS venue_slug,
-               (
-                 SELECT COUNT(*)
-                 FROM entry_artists ea2
-                 JOIN entries e2 ON e2.id = ea2.entry_id
-                 WHERE ea2.artist_id = a.id
-                   AND (
-                     e2.event_date < e.event_date
-                     OR (e2.event_date = e.event_date AND e2.created_at < e.created_at)
-                     OR (e2.event_date = e.event_date AND e2.created_at = e.created_at AND e2.id <= e.id)
-                   )
-               ) AS seen_count
+               ea.seen_count_override
         FROM entry_artists ea
         JOIN artists a ON a.id = ea.artist_id
         JOIN entries e ON e.id = ea.entry_id
@@ -806,6 +843,9 @@ def page_artist(environ, start_response, artist_ref):
         """,
         (artist["id"],),
     ).fetchall()
+    rows = [dict(row) for row in rows]
+    for row in rows:
+        row["seen_count"] = compute_seen_count(conn, artist["id"], row["id"])
     conn.close()
     items = "".join(
         f"<li>{esc(row['event_date'])} / <a href=\"/entries/{row['id']}\">{esc(row['title'] or '(untitled)')}</a> / <a href=\"/venues/{url_path_segment(row['venue_slug'])}\">{esc(row['venue_name'])}</a> <span class=\"pill\">{row['seen_count']}回目</span></li>"

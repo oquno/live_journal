@@ -173,11 +173,19 @@ main.wrap {
   margin-top: 8px;
 }
 
+.artist-row,
 .purchase-row {
   display: grid;
   gap: 8px;
-  grid-template-columns: 1.3fr 1.3fr 1fr;
   margin-bottom: 8px;
+}
+
+.artist-row {
+  grid-template-columns: 2fr 1fr;
+}
+
+.purchase-row {
+  grid-template-columns: 1.3fr 1.3fr 1fr;
 }
 
 .pill {
@@ -200,6 +208,7 @@ main.wrap {
   .site-header .wrap,
   .nav,
   .actions,
+  .artist-row,
   .purchase-row {
     display: block;
   }
@@ -208,6 +217,7 @@ main.wrap {
     margin-top: 8px;
   }
 
+  .artist-row input,
   .purchase-row input {
     margin-bottom: 8px;
   }
