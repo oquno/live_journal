@@ -1,5 +1,6 @@
 import html
 import os
+import secrets
 import sqlite3
 from datetime import datetime
 from http import cookies
@@ -15,11 +16,37 @@ APP_TITLE = os.environ.get("LIVE_JOURNAL_TITLE", "Live Journal")
 APP_MODE = os.environ.get("LIVE_JOURNAL_MODE", "private")
 ADMIN_USER = os.environ.get("LIVE_JOURNAL_USER", "admin")
 ADMIN_PASSWORD = os.environ.get("LIVE_JOURNAL_PASSWORD", "admin")
-SESSION_SECRET = os.environ.get("LIVE_JOURNAL_SESSION_SECRET", "dev-secret-change-me")
+SESSION_SECRET_PATH = os.environ.get(
+    "LIVE_JOURNAL_SESSION_SECRET_FILE",
+    os.path.join(BASE_DIR, "data", "session_secret"),
+)
+SESSION_SECRET = None
 
 
 def ensure_dirs():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    os.makedirs(os.path.dirname(SESSION_SECRET_PATH), exist_ok=True)
+
+
+def load_session_secret():
+    env_secret = os.environ.get("LIVE_JOURNAL_SESSION_SECRET")
+    if env_secret:
+        return env_secret
+
+    if os.path.exists(SESSION_SECRET_PATH):
+        with open(SESSION_SECRET_PATH, "r", encoding="utf-8") as f:
+            secret = f.read().strip()
+        if secret:
+            return secret
+
+    secret = secrets.token_hex(32)
+    with open(SESSION_SECRET_PATH, "w", encoding="utf-8") as f:
+        f.write(secret + "\n")
+    try:
+        os.chmod(SESSION_SECRET_PATH, 0o600)
+    except PermissionError:
+        pass
+    return secret
 
 
 def get_db():
@@ -30,7 +57,9 @@ def get_db():
 
 
 def init_db():
+    global SESSION_SECRET
     ensure_dirs()
+    SESSION_SECRET = load_session_secret()
     conn = get_db()
     with open(os.path.join(BASE_DIR, "schema.sql"), "r", encoding="utf-8") as f:
         conn.executescript(f.read())
