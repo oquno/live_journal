@@ -296,18 +296,32 @@ def layout(title, content, environ=None, flash_message=""):
 
 
 def render_entry_card(row):
-    artists = ", ".join(row["artist_names"].split("||")) if row["artist_names"] else ""
+    artists = ""
+    if row["artist_items"]:
+        artist_links = []
+        for item in row["artist_items"].split("||"):
+            name, _, slug = item.partition("\t")
+            if not name:
+                continue
+            artist_links.append(
+                f'<a class="typed-link artist-link" href="/artists/{url_path_segment(slug)}">'
+                f'<span aria-hidden="true">🎤</span><span class="visually-hidden">出演者: </span>{esc(name)}</a>'
+            )
+        artists = " ".join(artist_links)
     summary = esc((row["notes"] or "")[:120])
     title = esc(row["title"] or "(untitled)")
     return f"""
 <article class="card">
   <div class="card-head">
     <div>
-      <h2><a href="/entries/{row['id']}">{title}</a></h2>
-      <p class="muted">{esc(row['event_date'])} / <a href="/venues/{url_path_segment(row['venue_slug'])}">{esc(row['venue_name'])}</a></p>
+      <h2><a class="typed-link event-link" href="/entries/{row['id']}"><span aria-hidden="true">🎫</span><span class="visually-hidden">イベント: </span>{title}</a></h2>
+      <p class="card-meta">
+        <span class="typed-link date-item"><span aria-hidden="true">📅</span><span class="visually-hidden">日付: </span>{esc(row['event_date'])}</span>
+        <a class="typed-link venue-link" href="/venues/{url_path_segment(row['venue_slug'])}"><span aria-hidden="true">📍</span><span class="visually-hidden">会場: </span>{esc(row['venue_name'])}</a>
+      </p>
     </div>
   </div>
-  <p>{esc(artists)}</p>
+  <p class="artist-links">{artists}</p>
   <p class="muted">{summary}</p>
 </article>"""
 
@@ -689,7 +703,7 @@ def list_entries(conn, params, limit=None, offset=0):
     return conn.execute(
         f"""
         SELECT e.id, e.event_date, e.title, e.notes, e.venue_id, v.name AS venue_name, v.slug AS venue_slug,
-               GROUP_CONCAT(a.name, '||') AS artist_names
+               GROUP_CONCAT(a.name || CHAR(9) || a.slug, '||') AS artist_items
         FROM entries e
         JOIN venues v ON v.id = e.venue_id
         LEFT JOIN entry_artists ea ON ea.entry_id = e.id
@@ -842,7 +856,7 @@ def page_entry_detail(environ, start_response, entry_id):
     artists = "".join(
         f"""
         <li>
-          <a href="/artists/{url_path_segment(row['slug'])}">{esc(row['name'])}</a>
+          <a class="typed-link artist-link" href="/artists/{url_path_segment(row['slug'])}"><span aria-hidden="true">🎤</span><span class="visually-hidden">出演者: </span>{esc(row['name'])}</a>
           <span class="pill">{row['seen_count']}回目</span>
           {'<a href="' + esc(row['lastfm_url']) + '" target="_blank" rel="noreferrer">Last.fm</a>' if row['lastfm_url'] else ''}
         </li>
@@ -866,7 +880,10 @@ def page_entry_detail(environ, start_response, entry_id):
     body = f"""
     <article class="single-column">
       <h1>{esc(entry['title'] or '(untitled)')}</h1>
-      <p class="muted">{esc(entry['event_date'])} / <a href="/venues/{url_path_segment(entry['venue_slug'])}">{esc(entry['venue_name'])}</a></p>
+      <p class="meta-line">
+        <span class="typed-link date-item"><span aria-hidden="true">📅</span><span class="visually-hidden">日付: </span>{esc(entry['event_date'])}</span>
+        <a class="typed-link venue-link" href="/venues/{url_path_segment(entry['venue_slug'])}"><span aria-hidden="true">📍</span><span class="visually-hidden">会場: </span>{esc(entry['venue_name'])}</a>
+      </p>
       {actions}
       <section>
         <h2>演者</h2>
@@ -964,14 +981,21 @@ def page_artist(environ, start_response, artist_ref):
         row["seen_count"] = compute_seen_count(conn, artist["id"], row["id"])
     conn.close()
     items = "".join(
-        f"<li>{esc(row['event_date'])} / <a href=\"/entries/{row['id']}\">{esc(row['title'] or '(untitled)')}</a> / <a href=\"/venues/{url_path_segment(row['venue_slug'])}\">{esc(row['venue_name'])}</a> <span class=\"pill\">{row['seen_count']}回目</span></li>"
+        f"""
+        <li class="timeline-item">
+          <span class="typed-link date-item"><span aria-hidden="true">📅</span><span class="visually-hidden">日付: </span>{esc(row['event_date'])}</span>
+          <a class="typed-link event-link" href="/entries/{row['id']}"><span aria-hidden="true">🎫</span><span class="visually-hidden">イベント: </span>{esc(row['title'] or '(untitled)')}</a>
+          <a class="typed-link venue-link" href="/venues/{url_path_segment(row['venue_slug'])}"><span aria-hidden="true">📍</span><span class="visually-hidden">会場: </span>{esc(row['venue_name'])}</a>
+          <span class="pill">{row['seen_count']}回目</span>
+        </li>
+        """
         for row in rows
     ) or "<li>記録なし</li>"
     body = f"""
     <section class="single-column">
       <h1>{esc(artist['name'])}</h1>
       <p class="muted">観覧回数 {len(rows)} 回</p>
-      <ul>{items}</ul>
+      <ul class="timeline-list">{items}</ul>
     </section>
     """
     return response_html(start_response, layout(artist["name"], body, environ))
@@ -1002,14 +1026,20 @@ def page_venue(environ, start_response, venue_ref):
     ).fetchall()
     conn.close()
     items = "".join(
-        f"<li>{esc(row['event_date'])} / <a href=\"/entries/{row['id']}\">{esc(row['title'] or '(untitled)')}</a> / {esc(row['artists'] or '')}</li>"
+        f"""
+        <li class="timeline-item">
+          <span class="typed-link date-item"><span aria-hidden="true">📅</span><span class="visually-hidden">日付: </span>{esc(row['event_date'])}</span>
+          <a class="typed-link event-link" href="/entries/{row['id']}"><span aria-hidden="true">🎫</span><span class="visually-hidden">イベント: </span>{esc(row['title'] or '(untitled)')}</a>
+          <span class="typed-link"><span aria-hidden="true">🎤</span><span class="visually-hidden">出演者: </span>{esc(row['artists'] or '')}</span>
+        </li>
+        """
         for row in rows
     ) or "<li>記録なし</li>"
     body = f"""
     <section class="single-column">
       <h1>{esc(venue['name'])}</h1>
       <p class="muted">開催記録 {len(rows)} 件</p>
-      <ul>{items}</ul>
+      <ul class="timeline-list">{items}</ul>
     </section>
     """
     return response_html(start_response, layout(venue["name"], body, environ))
