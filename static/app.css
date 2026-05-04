@@ -96,7 +96,32 @@ main.wrap {
 
 .cards {
   display: grid;
-  gap: 16px;
+  gap: 10px;
+}
+
+.pagination {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 20px;
+}
+
+.pagination a,
+.pagination span {
+  min-width: 38px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  text-align: center;
+  text-decoration: none;
+}
+
+.pagination span {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
 }
 
 .card,
@@ -106,6 +131,19 @@ main.wrap {
   border: 1px solid var(--line);
   border-radius: 14px;
   padding: 18px;
+}
+
+.card {
+  padding: 12px 14px;
+}
+
+.card h2 {
+  font-size: 1.12rem;
+  margin: 0 0 4px;
+}
+
+.card p {
+  margin: 6px 0 0;
 }
 
 .flash {

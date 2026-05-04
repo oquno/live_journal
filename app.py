@@ -4,7 +4,7 @@ import secrets
 import sqlite3
 from datetime import datetime
 from http import cookies
-from urllib.parse import parse_qs, quote, unquote
+from urllib.parse import parse_qs, quote, unquote, urlencode
 from wsgiref.simple_server import make_server
 
 
@@ -16,6 +16,7 @@ APP_TITLE = os.environ.get("LIVE_JOURNAL_TITLE", "Live Journal")
 APP_MODE = os.environ.get("LIVE_JOURNAL_MODE", "private")
 ADMIN_USER = os.environ.get("LIVE_JOURNAL_USER", "admin")
 ADMIN_PASSWORD = os.environ.get("LIVE_JOURNAL_PASSWORD", "admin")
+ENTRY_PAGE_SIZE = 50
 SESSION_SECRET_PATH = os.environ.get(
     "LIVE_JOURNAL_SESSION_SECRET_FILE",
     os.path.join(BASE_DIR, "data", "session_secret"),
@@ -158,6 +159,26 @@ def decode_path_segment(value):
         return value
 
 
+def positive_int(value, default=1):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def query_path(params, page):
+    pairs = []
+    for key in ("q", "artist", "venue", "from", "to"):
+        value = first(params, key).strip()
+        if value:
+            pairs.append((key, value))
+    if page > 1:
+        pairs.append(("page", str(page)))
+    query = urlencode(pairs)
+    return "/" + (f"?{query}" if query else "")
+
+
 def parse_cookies(environ):
     jar = cookies.SimpleCookie()
     jar.load(environ.get("HTTP_COOKIE", ""))
@@ -289,6 +310,23 @@ def render_entry_card(row):
   <p>{esc(artists)}</p>
   <p class="muted">{summary}</p>
 </article>"""
+
+
+def render_pagination(params, page, total_count, page_size):
+    if total_count <= page_size:
+        return ""
+    total_pages = max(1, (total_count + page_size - 1) // page_size)
+    links = []
+    if page > 1:
+        links.append(f'<a href="{esc(query_path(params, page - 1))}">前へ</a>')
+    for number in range(1, total_pages + 1):
+        if number == page:
+            links.append(f'<span aria-current="page">{number}</span>')
+        else:
+            links.append(f'<a href="{esc(query_path(params, number))}">{number}</a>')
+    if page < total_pages:
+        links.append(f'<a href="{esc(query_path(params, page + 1))}">次へ</a>')
+    return f'<nav class="pagination" aria-label="ページネーション">{"".join(links)}</nav>'
 
 
 def load_entry(conn, entry_id):
@@ -580,7 +618,7 @@ def compute_seen_count(conn, artist_id, entry_id):
     return None
 
 
-def list_entries(conn, params):
+def entry_filter_parts(params):
     clauses = []
     values = []
     q = first(params, "q").strip()
@@ -626,6 +664,28 @@ def list_entries(conn, params):
     where = ""
     if clauses:
         where = "WHERE " + " AND ".join(clauses)
+    return where, values
+
+
+def count_entries(conn, params):
+    where, values = entry_filter_parts(params)
+    return conn.execute(
+        f"""
+        SELECT COUNT(*)
+        FROM entries e
+        JOIN venues v ON v.id = e.venue_id
+        {where}
+        """,
+        values,
+    ).fetchone()[0]
+
+
+def list_entries(conn, params, limit=None, offset=0):
+    where, values = entry_filter_parts(params)
+    pagination = ""
+    if limit is not None:
+        pagination = "LIMIT ? OFFSET ?"
+        values = values + [limit, offset]
     return conn.execute(
         f"""
         SELECT e.id, e.event_date, e.title, e.notes, e.venue_id, v.name AS venue_name, v.slug AS venue_slug,
@@ -637,6 +697,7 @@ def list_entries(conn, params):
         {where}
         GROUP BY e.id
         ORDER BY e.event_date DESC, e.created_at DESC, e.id DESC
+        {pagination}
         """,
         values,
     ).fetchall()
@@ -647,10 +708,15 @@ def page_home(environ, start_response):
         return redirect(start_response, "/login")
     conn = get_db()
     params = parse_query(environ)
-    entries = list_entries(conn, params)
+    total_count = count_entries(conn, params)
+    total_pages = max(1, (total_count + ENTRY_PAGE_SIZE - 1) // ENTRY_PAGE_SIZE)
+    page = min(positive_int(first(params, "page"), 1), total_pages)
+    offset = (page - 1) * ENTRY_PAGE_SIZE
+    entries = list_entries(conn, params, ENTRY_PAGE_SIZE, offset)
     artists = conn.execute("SELECT name FROM artists ORDER BY name").fetchall()
     venues = conn.execute("SELECT name FROM venues ORDER BY name").fetchall()
     cards = "".join(render_entry_card(row) for row in entries) or '<p class="muted">まだ記録がありません。</p>'
+    pagination = render_pagination(params, page, total_count, ENTRY_PAGE_SIZE)
     artist_options = "".join(f'<option value="{esc(row["name"])}">' for row in artists)
     venue_options = "".join(f'<option value="{esc(row["name"])}">' for row in venues)
     body = f"""
@@ -669,6 +735,7 @@ def page_home(environ, start_response):
     <datalist id="artists">{artist_options}</datalist>
     <datalist id="venues">{venue_options}</datalist>
     <section class="cards">{cards}</section>
+    {pagination}
     """
     conn.close()
     return response_html(start_response, layout("Entries", body, environ))
