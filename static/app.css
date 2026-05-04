@@ -9,13 +9,8 @@
   --artist: #8b2f63;
   --venue: #17647a;
   --date: #766b59;
-  --event-bg: #fff0dd;
-  --event-line: #e7b87d;
   --artist-bg: #ffeaf4;
   --artist-line: #dfa0c0;
-  --venue-bg: #e7f6f8;
-  --venue-line: #8fcad5;
-  --date-bg: #f1eadf;
   --danger: #9e2a2b;
 }
 
@@ -169,27 +164,19 @@ main.wrap {
 
 .typed-link {
   display: inline-flex;
-  gap: 0.35rem;
-  align-items: center;
-  min-height: 1.7rem;
+  gap: 0.28rem;
+  align-items: baseline;
   max-width: 100%;
-  padding: 0.18rem 0.52rem;
-  border: 1px solid transparent;
-  border-radius: 7px;
   text-decoration: none;
   transition:
     background-color 0.15s ease,
     border-color 0.15s ease,
-    box-shadow 0.15s ease,
-    color 0.15s ease,
-    transform 0.15s ease;
+    color 0.15s ease;
 }
 
 a.typed-link:hover,
 a.typed-link:focus-visible {
   text-decoration: none;
-  box-shadow: 0 5px 14px rgba(46, 38, 28, 0.1);
-  transform: translateY(-1px);
 }
 
 a.typed-link:focus-visible {
@@ -203,35 +190,31 @@ a.typed-link:focus-visible {
 }
 
 .date-item {
-  background: var(--date-bg);
-  border-color: color-mix(in srgb, var(--date) 24%, transparent);
   color: var(--date);
   font-variant-numeric: tabular-nums;
 }
 
 .event-link {
-  background: var(--event-bg);
-  border-color: var(--event-line);
   color: var(--event);
   font-weight: 700;
 }
 
 .artist-link {
+  align-items: center;
   background: var(--artist-bg);
-  border-color: var(--artist-line);
+  border: 1px solid var(--artist-line);
+  border-radius: 7px;
   color: var(--artist);
+  padding: 0.12rem 0.44rem;
 }
 
 .venue-link {
-  background: var(--venue-bg);
-  border-color: var(--venue-line);
   color: var(--venue);
 }
 
 .event-link:hover,
 .event-link:focus-visible {
-  background: #ffe6c4;
-  border-color: #cf8840;
+  color: #6f3910;
 }
 
 .artist-link:hover,
@@ -242,8 +225,7 @@ a.typed-link:focus-visible {
 
 .venue-link:hover,
 .venue-link:focus-visible {
-  background: #d3eef3;
-  border-color: #5fb0bf;
+  color: #0f5062;
 }
 
 .artist-links {

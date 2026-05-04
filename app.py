@@ -314,7 +314,7 @@ def render_entry_card(row):
 <article class="card">
   <div class="card-head">
     <div>
-      <h2><a class="typed-link event-link" href="/entries/{row['id']}"><span aria-hidden="true">🎫</span>{title}</a></h2>
+      <h2><a class="typed-link event-link" href="/entries/{row['id']}">{title}</a></h2>
       <p class="card-meta">
         <span class="typed-link date-item"><span aria-hidden="true">📅</span>{esc(row['event_date'])}</span>
         <a class="typed-link venue-link" href="/venues/{url_path_segment(row['venue_slug'])}"><span aria-hidden="true">📍</span>{esc(row['venue_name'])}</a>
@@ -985,7 +985,7 @@ def page_artist(environ, start_response, artist_ref):
         f"""
         <li class="timeline-item">
           <span class="typed-link date-item"><span aria-hidden="true">📅</span>{esc(row['event_date'])}</span>
-          <a class="typed-link event-link" href="/entries/{row['id']}"><span aria-hidden="true">🎫</span>{esc(row['title'] or '(untitled)')}</a>
+          <a class="typed-link event-link" href="/entries/{row['id']}">{esc(row['title'] or '(untitled)')}</a>
           <a class="typed-link venue-link" href="/venues/{url_path_segment(row['venue_slug'])}"><span aria-hidden="true">📍</span>{esc(row['venue_name'])}</a>
           <span class="pill">{row['seen_count']}回目</span>
         </li>
@@ -1030,7 +1030,7 @@ def page_venue(environ, start_response, venue_ref):
         f"""
         <li class="timeline-item">
           <span class="typed-link date-item"><span aria-hidden="true">📅</span>{esc(row['event_date'])}</span>
-          <a class="typed-link event-link" href="/entries/{row['id']}"><span aria-hidden="true">🎫</span>{esc(row['title'] or '(untitled)')}</a>
+          <a class="typed-link event-link" href="/entries/{row['id']}">{esc(row['title'] or '(untitled)')}</a>
           <span class="typed-link"><span aria-hidden="true">🎤</span>{esc(row['artists'] or '')}</span>
         </li>
         """
