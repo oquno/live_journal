@@ -906,7 +906,8 @@ def page_entry_detail(environ, start_response, entry_id):
       </section>
     </article>
     """
-    return response_html(start_response, layout("Entry Detail", body, environ))
+    return response_html(start_response,
+        layout(f"{esc(entry['event_date'])} {esc(entry['title'] or '(untitled)')} at {esc(entry['venue_name'])}", body, environ))
 
 
 def page_edit_entry(environ, start_response, entry_id, values=None, errors=None):
