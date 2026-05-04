@@ -401,7 +401,7 @@ def render_entry_form(values, action, submit_label, errors=None):
     artist_fields = "".join(artist_rows)
 
     purchase_rows = []
-    max_rows = max(len(purchase_names), len(purchase_urls), len(purchase_notes))
+    max_rows = max(1, len(purchase_names), len(purchase_urls), len(purchase_notes))
     for idx in range(max_rows):
         purchase_rows.append(
             f"""
@@ -442,7 +442,10 @@ def render_entry_form(values, action, submit_label, errors=None):
       </fieldset>
       <fieldset>
         <legend>購入物</legend>
-        {purchase_block}
+        <div id="purchase-fields">
+          {purchase_block}
+        </div>
+        <button type="button" class="secondary-button" data-add-purchase>購入物を追加</button>
         <p class="hint">URL がなくても記録できます。</p>
       </fieldset>
       <label>メモ
@@ -456,15 +459,26 @@ def render_entry_form(values, action, submit_label, errors=None):
         <input name="artist_seen_counts" value="" placeholder="何回目か(任意)" inputmode="numeric">
       </div>
     </template>
+    <template id="purchase-row-template">
+      <div class="purchase-row">
+        <input name="purchase_names" value="" placeholder="購入物名">
+        <input name="purchase_urls" value="" placeholder="URL">
+        <input name="purchase_notes" value="" placeholder="メモ">
+      </div>
+    </template>
     <script>
       (() => {{
-        const addButton = document.querySelector('[data-add-artist]');
-        const artistFields = document.querySelector('#artist-fields');
-        const template = document.querySelector('#artist-row-template');
-        if (!addButton || !artistFields || !template) return;
-        addButton.addEventListener('click', () => {{
-          artistFields.appendChild(template.content.firstElementChild.cloneNode(true));
-        }});
+        const addRow = (buttonSelector, fieldsSelector, templateSelector) => {{
+          const addButton = document.querySelector(buttonSelector);
+          const fields = document.querySelector(fieldsSelector);
+          const template = document.querySelector(templateSelector);
+          if (!addButton || !fields || !template) return;
+          addButton.addEventListener('click', () => {{
+            fields.appendChild(template.content.firstElementChild.cloneNode(true));
+          }});
+        }};
+        addRow('[data-add-artist]', '#artist-fields', '#artist-row-template');
+        addRow('[data-add-purchase]', '#purchase-fields', '#purchase-row-template');
       }})();
     </script>
     """
