@@ -9,6 +9,13 @@
   --artist: #8b2f63;
   --venue: #17647a;
   --date: #766b59;
+  --event-bg: #fff0dd;
+  --event-line: #e7b87d;
+  --artist-bg: #ffeaf4;
+  --artist-line: #dfa0c0;
+  --venue-bg: #e7f6f8;
+  --venue-line: #8fcad5;
+  --date-bg: #f1eadf;
   --danger: #9e2a2b;
 }
 
@@ -156,68 +163,87 @@ main.wrap {
 .timeline-item {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px 12px;
+  gap: 7px 8px;
   align-items: center;
 }
 
 .typed-link {
   display: inline-flex;
-  gap: 4px;
-  align-items: baseline;
-  border-bottom: 1px solid transparent;
+  gap: 0.35rem;
+  align-items: center;
+  min-height: 1.7rem;
+  max-width: 100%;
+  padding: 0.18rem 0.52rem;
+  border: 1px solid transparent;
+  border-radius: 7px;
   text-decoration: none;
-  text-underline-offset: 3px;
   transition:
     background-color 0.15s ease,
     border-color 0.15s ease,
-    color 0.15s ease;
+    box-shadow 0.15s ease,
+    color 0.15s ease,
+    transform 0.15s ease;
 }
 
 a.typed-link:hover,
 a.typed-link:focus-visible {
-  border-bottom-color: currentColor;
+  text-decoration: none;
+  box-shadow: 0 5px 14px rgba(46, 38, 28, 0.1);
+  transform: translateY(-1px);
 }
 
 a.typed-link:focus-visible {
-  outline: 2px solid currentColor;
+  outline: 2px solid color-mix(in srgb, currentColor 65%, white);
   outline-offset: 3px;
 }
 
 .typed-link [aria-hidden="true"] {
-  opacity: 0.8;
+  line-height: 1;
+  opacity: 0.72;
 }
 
 .date-item {
+  background: var(--date-bg);
+  border-color: color-mix(in srgb, var(--date) 24%, transparent);
   color: var(--date);
   font-variant-numeric: tabular-nums;
 }
 
 .event-link {
+  background: var(--event-bg);
+  border-color: var(--event-line);
   color: var(--event);
   font-weight: 700;
 }
 
 .artist-link {
+  background: var(--artist-bg);
+  border-color: var(--artist-line);
   color: var(--artist);
 }
 
 .venue-link {
+  background: var(--venue-bg);
+  border-color: var(--venue-line);
   color: var(--venue);
 }
 
 .event-link:hover,
 .event-link:focus-visible {
-  background: rgba(138, 75, 19, 0.1);
+  background: #ffe6c4;
+  border-color: #cf8840;
 }
 
 .artist-link:hover,
 .artist-link:focus-visible {
-  background: rgba(139, 47, 99, 0.1);
+  background: #ffd8ea;
+  border-color: #c96b9a;
 }
 
 .venue-link:hover,
 .venue-link:focus-visible {
-  background: rgba(23, 100, 122, 0.1);
+  background: #d3eef3;
+  border-color: #5fb0bf;
 }
 
 .artist-links {
