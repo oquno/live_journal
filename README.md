@@ -12,18 +12,15 @@ python app.py
 
 起動後、`http://127.0.0.1:8000` を開きます。
 
-初期ログイン情報:
+更新操作には管理者パスワードが必要です。起動前に `LIVE_JOURNAL_PASSWORD` を設定してください。
 
-- ID: `admin`
-- Password: `admin`
-
-本番では以下を設定してください。
+本番では以下のように設定してください。
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-export LIVE_JOURNAL_PASSWORD='change-me'
+export LIVE_JOURNAL_PASSWORD='<strong random password>'
 gunicorn wsgi:application --bind 127.0.0.1:8000 --workers 2
 ```
 
@@ -52,13 +49,25 @@ cd /opt/live_journal
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-export LIVE_JOURNAL_PASSWORD='change-me'
+export LIVE_JOURNAL_PASSWORD='<strong random password>'
 .venv/bin/gunicorn wsgi:application --bind 127.0.0.1:8000 --workers 2
 ```
 
 リバースプロキシは nginx か Caddy を前段に置く前提です。
 
-systemd を使う場合は [deploy/live-journal.service](/home/oquno/live_journal/deploy/live-journal.service:1) を `/etc/systemd/system/live-journal.service` に置いて、環境変数や `WorkingDirectory` を実際のパスに合わせて修正してください。
+systemd を使う場合は [deploy/live-journal.service](deploy/live-journal.service) を `/etc/systemd/system/live-journal.service` に置いて、環境変数や `WorkingDirectory` を実際のパスに合わせて修正してください。
+`LIVE_JOURNAL_PASSWORD` などの秘密情報は `/etc/live-journal.env` に置く想定です。
+
+```bash
+sudo install -m 600 /dev/null /etc/live-journal.env
+sudoedit /etc/live-journal.env
+```
+
+`/etc/live-journal.env` の例:
+
+```sh
+LIVE_JOURNAL_PASSWORD=<strong random password>
+```
 
 ```bash
 sudo systemctl daemon-reload

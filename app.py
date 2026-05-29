@@ -1,4 +1,6 @@
 import html
+import hashlib
+import hmac
 import os
 import secrets
 import sqlite3
@@ -15,7 +17,7 @@ PORT = int(os.environ.get("LIVE_JOURNAL_PORT", "8000"))
 APP_TITLE = os.environ.get("LIVE_JOURNAL_TITLE", "Live Journal")
 APP_MODE = os.environ.get("LIVE_JOURNAL_MODE", "private")
 ADMIN_USER = os.environ.get("LIVE_JOURNAL_USER", "admin")
-ADMIN_PASSWORD = os.environ.get("LIVE_JOURNAL_PASSWORD", "admin")
+ADMIN_PASSWORD = os.environ.get("LIVE_JOURNAL_PASSWORD")
 ENTRY_PAGE_SIZE = 50
 SESSION_SECRET_PATH = os.environ.get(
     "LIVE_JOURNAL_SESSION_SECRET_FILE",
@@ -141,6 +143,11 @@ def url_ok(value):
     return not value or value.startswith("http://") or value.startswith("https://")
 
 
+def safe_external_url(value):
+    value = (value or "").strip()
+    return value if url_ok(value) else ""
+
+
 def parse_body(environ):
     length = int(environ.get("CONTENT_LENGTH") or 0)
     raw = environ["wsgi.input"].read(length).decode("utf-8")
@@ -208,18 +215,12 @@ def parse_cookies(environ):
 
 
 def sign_session(username):
-    import hashlib
-    import hmac
-
     payload = username.encode("utf-8")
     sig = hmac.new(SESSION_SECRET.encode("utf-8"), payload, hashlib.sha256).hexdigest()
     return f"{username}:{sig}"
 
 
 def verify_session(token):
-    import hashlib
-    import hmac
-
     if ":" not in token:
         return None
     username, sig = token.split(":", 1)
@@ -229,12 +230,19 @@ def verify_session(token):
     return None
 
 
-def current_user(environ):
+def session_cookie_value(environ):
     jar = parse_cookies(environ)
     token = jar.get("live_journal_session")
     if not token:
+        return ""
+    return token.value
+
+
+def current_user(environ):
+    token = session_cookie_value(environ)
+    if not token:
         return None
-    return verify_session(token.value)
+    return verify_session(token)
 
 
 def is_authenticated(environ):
@@ -243,6 +251,45 @@ def is_authenticated(environ):
 
 def can_view(environ):
     return APP_MODE == "public" or is_authenticated(environ)
+
+
+def csrf_token(environ):
+    token = session_cookie_value(environ)
+    if not token:
+        return ""
+    payload = f"csrf:{token}".encode("utf-8")
+    return hmac.new(SESSION_SECRET.encode("utf-8"), payload, hashlib.sha256).hexdigest()
+
+
+def csrf_input(environ):
+    token = csrf_token(environ)
+    if not token:
+        return ""
+    return f'<input type="hidden" name="csrf_token" value="{esc(token)}">'
+
+
+def verify_csrf(environ, params):
+    expected = csrf_token(environ)
+    submitted = first(params, "csrf_token")
+    return bool(expected) and hmac.compare_digest(expected, submitted)
+
+
+def is_secure_request(environ):
+    if environ.get("wsgi.url_scheme") == "https":
+        return True
+    forwarded_proto = environ.get("HTTP_X_FORWARDED_PROTO", "").split(",", 1)[0].strip()
+    return forwarded_proto == "https"
+
+
+def session_cookie(name, value, environ):
+    cookie = cookies.SimpleCookie()
+    cookie[name] = value
+    cookie[name]["path"] = "/"
+    cookie[name]["httponly"] = True
+    cookie[name]["samesite"] = "Lax"
+    if is_secure_request(environ):
+        cookie[name]["secure"] = True
+    return cookie
 
 
 def redirect(start_response, location, extra_headers=None):
@@ -276,11 +323,11 @@ def response_bad_request(start_response, message):
 def nav(environ):
     auth = is_authenticated(environ)
     links = ['<a href="/">Entries</a>']
-    if can_view(environ):
+    if auth:
         links.append('<a href="/entries/new">New Entry</a>')
     if auth:
         links.append(
-            '<form method="post" action="/logout" class="inline-form"><button type="submit">Logout</button></form>'
+            f'<form method="post" action="/logout" class="inline-form">{csrf_input(environ)}<button type="submit">Logout</button></form>'
         )
     else:
         links.append('<a href="/login">Login</a>')
@@ -401,7 +448,7 @@ def load_entry(conn, entry_id):
     return {"entry": row, "artists": artists, "purchases": purchases, "links": links}
 
 
-def render_entry_form(values, action, submit_label, errors=None):
+def render_entry_form(values, action, submit_label, environ, errors=None):
     errors = errors or []
     artist_inputs = values.get("artists", [""])
     artist_seen_counts = values.get("artist_seen_counts", [""])
@@ -458,6 +505,7 @@ def render_entry_form(values, action, submit_label, errors=None):
     return f"""
     {error_block}
     <form method="post" action="{esc(action)}" class="entry-form">
+      {csrf_input(environ)}
       <label>開催日
         <input type="date" name="event_date" value="{esc(values.get('event_date', ''))}" required>
       </label>
@@ -852,10 +900,16 @@ def page_home(environ, start_response):
 
 
 def page_login(environ, start_response, error=""):
+    password_notice = ""
+    disabled = ""
+    if not ADMIN_PASSWORD:
+        password_notice = '<p class="flash error">LIVE_JOURNAL_PASSWORD が未設定のためログインできません。</p>'
+        disabled = " disabled"
     body = f"""
     <section class="single-column">
       <h1>Login</h1>
       <p class="muted">更新操作にはログインが必要です。</p>
+      {password_notice}
       <form method="post" action="/login" class="entry-form compact">
         <label>ID
           <input type="text" name="username" value="{esc(ADMIN_USER)}">
@@ -863,7 +917,7 @@ def page_login(environ, start_response, error=""):
         <label>Password
           <input type="password" name="password">
         </label>
-        <button type="submit">Login</button>
+        <button type="submit"{disabled}>Login</button>
       </form>
     </section>
     """
@@ -874,18 +928,17 @@ def handle_login(environ, start_response):
     params = parse_body(environ)
     username = first(params, "username")
     password = first(params, "password")
-    if username == ADMIN_USER and password == ADMIN_PASSWORD:
-        cookie = cookies.SimpleCookie()
-        cookie["live_journal_session"] = sign_session(username)
-        cookie["live_journal_session"]["path"] = "/"
+    if ADMIN_PASSWORD and hmac.compare_digest(username, ADMIN_USER) and hmac.compare_digest(password, ADMIN_PASSWORD):
+        cookie = session_cookie("live_journal_session", sign_session(username), environ)
         return redirect(start_response, "/", [("Set-Cookie", cookie.output(header="").strip())])
     return page_login(environ, start_response, "ログインに失敗しました。")
 
 
-def handle_logout(start_response):
-    cookie = cookies.SimpleCookie()
-    cookie["live_journal_session"] = ""
-    cookie["live_journal_session"]["path"] = "/"
+def handle_logout(environ, start_response):
+    params = parse_body(environ)
+    if is_authenticated(environ) and not verify_csrf(environ, params):
+        return response_forbidden(start_response)
+    cookie = session_cookie("live_journal_session", "", environ)
     cookie["live_journal_session"]["expires"] = "Thu, 01 Jan 1970 00:00:00 GMT"
     return redirect(start_response, "/login", [("Set-Cookie", cookie.output(header="").strip())])
 
@@ -921,7 +974,7 @@ def page_new_entry(environ, start_response, values=None, errors=None):
     <section class="single-column">
       <h1>新規記録</h1>
       <datalist id="venues">{venue_options}</datalist>
-      {render_entry_form(values, "/entries", "保存", errors)}
+      {render_entry_form(values, "/entries", "保存", environ, errors)}
     </section>
     """
     return response_html(start_response, layout("New Entry", body, environ))
@@ -930,7 +983,10 @@ def page_new_entry(environ, start_response, values=None, errors=None):
 def handle_create_entry(environ, start_response):
     if not require_auth(environ, start_response):
         return [b""]
-    values = collect_form_values(parse_body(environ))
+    params = parse_body(environ)
+    if not verify_csrf(environ, params):
+        return response_forbidden(start_response)
+    values = collect_form_values(params)
     errors = validate_entry_form(values)
     if errors:
         return page_new_entry(environ, start_response, values, errors)
@@ -954,18 +1010,19 @@ def page_entry_detail(environ, start_response, entry_id):
         <li>
           <a class="typed-link artist-link" href="/artists/{url_path_segment(row['slug'])}"><span aria-hidden="true">🎤</span>{esc(row['name'])}</a>
           <span class="pill">{row['seen_count']}回目</span>
-          {'<a href="' + esc(row['lastfm_url']) + '" target="_blank" rel="noreferrer">Last.fm</a>' if row['lastfm_url'] else ''}
+          {'<a href="' + esc(safe_external_url(row['lastfm_url'])) + '" target="_blank" rel="noreferrer">Last.fm</a>' if safe_external_url(row['lastfm_url']) else ''}
         </li>
         """
         for row in loaded["artists"]
     )
     purchases = "".join(
-        f"<li>{esc(row['item_name'])} {'<a href=\"' + esc(row['item_url']) + '\" target=\"_blank\" rel=\"noreferrer\">link</a>' if row['item_url'] else ''} {esc(row['notes'])}</li>"
+        f"<li>{esc(row['item_name'])} {'<a href=\"' + esc(safe_external_url(row['item_url'])) + '\" target=\"_blank\" rel=\"noreferrer\">link</a>' if safe_external_url(row['item_url']) else ''} {esc(row['notes'])}</li>"
         for row in loaded["purchases"]
     ) or "<li>なし</li>"
     links = "".join(
-        f'<li>{esc(row["label"])}: <a href="{esc(row["url"])}" target="_blank" rel="noreferrer">{esc(row["url"])}</a></li>'
+        f'<li>{esc(row["label"])}: <a href="{esc(safe_external_url(row["url"]))}" target="_blank" rel="noreferrer">{esc(safe_external_url(row["url"]))}</a></li>'
         for row in loaded["links"]
+        if safe_external_url(row["url"])
     ) or "<li>なし</li>"
     actions = ""
     if is_authenticated(environ):
@@ -973,6 +1030,7 @@ def page_entry_detail(environ, start_response, entry_id):
         <div class="actions">
           <a class="button-link" href="/entries/{entry['id']}/edit">編集</a>
           <form method="post" action="/entries/{entry['id']}/delete" class="inline-form" onsubmit="return confirm('削除しますか?');">
+            {csrf_input(environ)}
             <button type="submit" class="danger">削除</button>
           </form>
         </div>
@@ -1018,7 +1076,7 @@ def page_edit_entry(environ, start_response, entry_id, values=None, errors=None)
     body = f"""
     <section class="single-column">
       <h1>記録を編集</h1>
-      {render_entry_form(entry_values, f"/entries/{entry_id}", "更新", errors)}
+      {render_entry_form(entry_values, f"/entries/{entry_id}", "更新", environ, errors)}
     </section>
     """
     return response_html(start_response, layout("Edit Entry", body, environ))
@@ -1027,7 +1085,10 @@ def page_edit_entry(environ, start_response, entry_id, values=None, errors=None)
 def handle_update_entry(environ, start_response, entry_id):
     if not require_auth(environ, start_response):
         return [b""]
-    values = collect_form_values(parse_body(environ))
+    params = parse_body(environ)
+    if not verify_csrf(environ, params):
+        return response_forbidden(start_response)
+    values = collect_form_values(params)
     errors = validate_entry_form(values)
     if errors:
         return page_edit_entry(environ, start_response, entry_id, values, errors)
@@ -1043,6 +1104,9 @@ def handle_update_entry(environ, start_response, entry_id):
 def handle_delete_entry(environ, start_response, entry_id):
     if not require_auth(environ, start_response):
         return [b""]
+    params = parse_body(environ)
+    if not verify_csrf(environ, params):
+        return response_forbidden(start_response)
     conn = get_db()
     conn.execute("DELETE FROM entries WHERE id = ?", (entry_id,))
     conn.commit()
@@ -1144,8 +1208,10 @@ def page_venue(environ, start_response, venue_ref):
 
 
 def serve_static(start_response, path):
-    full = os.path.join(BASE_DIR, path.lstrip("/"))
-    if not os.path.isfile(full):
+    static_root = os.path.realpath(os.path.join(BASE_DIR, "static"))
+    relative = path[len("/static/"):]
+    full = os.path.realpath(os.path.join(static_root, relative))
+    if not full.startswith(static_root + os.sep) or not os.path.isfile(full):
         return response_not_found(start_response)
     content_type = "text/css; charset=utf-8" if full.endswith(".css") else "application/octet-stream"
     with open(full, "rb") as f:
@@ -1166,7 +1232,7 @@ def application(environ, start_response):
     if path == "/login" and method == "POST":
         return handle_login(environ, start_response)
     if path == "/logout" and method == "POST":
-        return handle_logout(start_response)
+        return handle_logout(environ, start_response)
     if path == "/" and method == "GET":
         return page_home(environ, start_response)
     if path == "/entries/new" and method == "GET":
