@@ -67,8 +67,30 @@ def init_db():
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(entry_artists)").fetchall()}
     if "seen_count_override" not in columns:
         conn.execute("ALTER TABLE entry_artists ADD COLUMN seen_count_override INTEGER")
+    migrate_legacy_entry_links(conn)
     conn.commit()
     conn.close()
+
+
+def migrate_legacy_entry_links(conn):
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(entries)").fetchall()}
+    legacy_links = (("blog_url", "Blog", 1), ("flickr_url", "Flickr", 2))
+    for column, label, display_order in legacy_links:
+        if column not in columns:
+            continue
+        conn.execute(
+            f"""
+            INSERT INTO entry_links(entry_id, label, url, display_order)
+            SELECT e.id, ?, TRIM(e.{column}), ?
+            FROM entries e
+            WHERE TRIM(COALESCE(e.{column}, '')) != ''
+              AND NOT EXISTS (
+                SELECT 1 FROM entry_links el
+                WHERE el.entry_id = e.id AND el.url = TRIM(e.{column})
+              )
+            """,
+            (label, display_order),
+        )
 
 
 def slugify(text):
@@ -372,7 +394,11 @@ def load_entry(conn, entry_id):
         "SELECT * FROM purchases WHERE entry_id = ? ORDER BY display_order, id",
         (entry_id,),
     ).fetchall()
-    return {"entry": row, "artists": artists, "purchases": purchases}
+    links = conn.execute(
+        "SELECT * FROM entry_links WHERE entry_id = ? ORDER BY display_order, id",
+        (entry_id,),
+    ).fetchall()
+    return {"entry": row, "artists": artists, "purchases": purchases, "links": links}
 
 
 def render_entry_form(values, action, submit_label, errors=None):
@@ -382,6 +408,8 @@ def render_entry_form(values, action, submit_label, errors=None):
     purchase_names = values.get("purchase_names", [""])
     purchase_urls = values.get("purchase_urls", [""])
     purchase_notes = values.get("purchase_notes", [""])
+    link_labels = values.get("link_labels", [""])
+    link_urls = values.get("link_urls", [""])
     error_block = ""
     if errors:
         items = "".join(f"<li>{esc(error)}</li>" for error in errors)
@@ -414,6 +442,19 @@ def render_entry_form(values, action, submit_label, errors=None):
         )
     purchase_block = "".join(purchase_rows)
 
+    link_rows = []
+    max_links = max(1, len(link_labels), len(link_urls))
+    for idx in range(max_links):
+        link_rows.append(
+            f"""
+            <div class="link-row">
+              <input name="link_labels" value="{esc(link_labels[idx] if idx < len(link_labels) else '')}" placeholder="ラベル">
+              <input type="url" name="link_urls" value="{esc(link_urls[idx] if idx < len(link_urls) else '')}" placeholder="URL">
+            </div>
+            """
+        )
+    link_block = "".join(link_rows)
+
     return f"""
     {error_block}
     <form method="post" action="{esc(action)}" class="entry-form">
@@ -426,12 +467,13 @@ def render_entry_form(values, action, submit_label, errors=None):
       <label>会場
         <input type="text" name="venue" value="{esc(values.get('venue', ''))}" required list="venues">
       </label>
-      <label>ブログ URL
-        <input type="url" name="blog_url" value="{esc(values.get('blog_url', ''))}">
-      </label>
-      <label>Flickr URL
-        <input type="url" name="flickr_url" value="{esc(values.get('flickr_url', ''))}">
-      </label>
+      <fieldset>
+        <legend>関連リンク</legend>
+        <div id="link-fields">
+          {link_block}
+        </div>
+        <button type="button" class="secondary-button" data-add-link>関連リンクを追加</button>
+      </fieldset>
       <fieldset>
         <legend>演者</legend>
         <div id="artist-fields">
@@ -466,6 +508,12 @@ def render_entry_form(values, action, submit_label, errors=None):
         <input name="purchase_notes" value="" placeholder="メモ">
       </div>
     </template>
+    <template id="link-row-template">
+      <div class="link-row">
+        <input name="link_labels" value="" placeholder="ラベル">
+        <input type="url" name="link_urls" value="" placeholder="URL">
+      </div>
+    </template>
     <script>
       (() => {{
         const addRow = (buttonSelector, fieldsSelector, templateSelector) => {{
@@ -479,6 +527,7 @@ def render_entry_form(values, action, submit_label, errors=None):
         }};
         addRow('[data-add-artist]', '#artist-fields', '#artist-row-template');
         addRow('[data-add-purchase]', '#purchase-fields', '#purchase-row-template');
+        addRow('[data-add-link]', '#link-fields', '#link-row-template');
       }})();
     </script>
     """
@@ -489,14 +538,14 @@ def collect_form_values(params):
         "event_date": first(params, "event_date"),
         "title": first(params, "title"),
         "venue": first(params, "venue"),
-        "blog_url": first(params, "blog_url"),
-        "flickr_url": first(params, "flickr_url"),
         "notes": first(params, "notes"),
         "artists": params.get("artists", [""]),
         "artist_seen_counts": params.get("artist_seen_counts", [""]),
         "purchase_names": params.get("purchase_names", [""]),
         "purchase_urls": params.get("purchase_urls", [""]),
         "purchase_notes": params.get("purchase_notes", [""]),
+        "link_labels": params.get("link_labels", [""]),
+        "link_urls": params.get("link_urls", [""]),
     }
 
 
@@ -523,9 +572,21 @@ def validate_entry_form(values):
         if not count.isdigit() or int(count) <= 0:
             errors.append("何回目かは 1 以上の整数で入力してください。")
             break
-    for field in ("blog_url", "flickr_url"):
-        if not url_ok(values[field]):
-            errors.append(f"{field} は http/https の URL を入力してください。")
+    link_count = max(len(values["link_labels"]), len(values["link_urls"]))
+    for idx in range(link_count):
+        label = values["link_labels"][idx].strip() if idx < len(values["link_labels"]) else ""
+        link_url = values["link_urls"][idx].strip() if idx < len(values["link_urls"]) else ""
+        if not any([label, link_url]):
+            continue
+        if not label:
+            errors.append("関連リンクのラベルを入力してください。")
+            break
+        if not link_url:
+            errors.append("関連リンク URL を入力してください。")
+            break
+        if not url_ok(link_url):
+            errors.append("関連リンク URL は http/https の URL を入力してください。")
+            break
     for url in values["purchase_urls"]:
         if url.strip() and not url_ok(url.strip()):
             errors.append("購入物 URL は http/https の URL を入力してください。")
@@ -537,28 +598,27 @@ def save_entry(conn, values, entry_id=None):
     venue_id = get_or_create_venue(conn, values["venue"])
     title = values["title"].strip()
     notes = values["notes"].strip()
-    blog_url = values["blog_url"].strip()
-    flickr_url = values["flickr_url"].strip()
     if entry_id is None:
         cur = conn.execute(
             """
-            INSERT INTO entries(event_date, title, venue_id, notes, blog_url, flickr_url, visibility, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'private', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            INSERT INTO entries(event_date, title, venue_id, notes, visibility, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 'private', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             """,
-            (values["event_date"], title, venue_id, notes, blog_url, flickr_url),
+            (values["event_date"], title, venue_id, notes),
         )
         entry_id = cur.lastrowid
     else:
         conn.execute(
             """
             UPDATE entries
-            SET event_date = ?, title = ?, venue_id = ?, notes = ?, blog_url = ?, flickr_url = ?, updated_at = CURRENT_TIMESTAMP
+            SET event_date = ?, title = ?, venue_id = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
-            (values["event_date"], title, venue_id, notes, blog_url, flickr_url, entry_id),
+            (values["event_date"], title, venue_id, notes, entry_id),
         )
         conn.execute("DELETE FROM entry_artists WHERE entry_id = ?", (entry_id,))
         conn.execute("DELETE FROM purchases WHERE entry_id = ?", (entry_id,))
+        conn.execute("DELETE FROM entry_links WHERE entry_id = ?", (entry_id,))
 
     artist_names = values["artists"]
     artist_seen_counts = values.get("artist_seen_counts", [])
@@ -597,6 +657,24 @@ def save_entry(conn, values, entry_id=None):
         )
         order += 1
 
+    link_labels = values["link_labels"]
+    link_urls = values["link_urls"]
+    link_count = max(len(link_labels), len(link_urls))
+    link_order = 1
+    for idx in range(link_count):
+        label = link_labels[idx].strip() if idx < len(link_labels) else ""
+        link_url = link_urls[idx].strip() if idx < len(link_urls) else ""
+        if not any([label, link_url]):
+            continue
+        conn.execute(
+            """
+            INSERT INTO entry_links(entry_id, label, url, display_order)
+            VALUES (?, ?, ?, ?)
+            """,
+            (entry_id, label, link_url, link_order),
+        )
+        link_order += 1
+
     conn.commit()
     return entry_id
 
@@ -610,14 +688,14 @@ def load_entry_form_values(conn, entry_id):
         "event_date": entry["event_date"],
         "title": entry["title"] or "",
         "venue": entry["venue_name"],
-        "blog_url": entry["blog_url"] or "",
-        "flickr_url": entry["flickr_url"] or "",
         "notes": entry["notes"] or "",
         "artists": [row["name"] for row in loaded["artists"]] or [""],
         "artist_seen_counts": [str(row["seen_count_override"] or "") for row in loaded["artists"]] or [""],
         "purchase_names": [row["item_name"] or "" for row in loaded["purchases"]] or [""],
         "purchase_urls": [row["item_url"] or "" for row in loaded["purchases"]] or [""],
         "purchase_notes": [row["notes"] or "" for row in loaded["purchases"]] or [""],
+        "link_labels": [row["label"] for row in loaded["links"]] or [""],
+        "link_urls": [row["url"] for row in loaded["links"]] or [""],
     }
     return values
 
@@ -671,10 +749,14 @@ def entry_filter_parts(params):
                 SELECT 1 FROM purchases qp
                 WHERE qp.entry_id = e.id AND qp.item_name LIKE ?
               )
+              OR EXISTS (
+                SELECT 1 FROM entry_links ql
+                WHERE ql.entry_id = e.id AND (ql.label LIKE ? OR ql.url LIKE ?)
+              )
             )
             """
         )
-        values.extend([like, like, like, like, like])
+        values.extend([like, like, like, like, like, like, like])
     if artist:
         clauses.append(
             "EXISTS (SELECT 1 FROM entry_artists fea JOIN artists fa ON fa.id = fea.artist_id WHERE fea.entry_id = e.id AND fa.name = ?)"
@@ -825,14 +907,14 @@ def page_new_entry(environ, start_response, values=None, errors=None):
         "event_date": "",
         "title": "",
         "venue": "",
-        "blog_url": "",
-        "flickr_url": "",
         "notes": "",
         "artists": [""],
         "artist_seen_counts": [""],
         "purchase_names": ["", "", ""],
         "purchase_urls": ["", "", ""],
         "purchase_notes": ["", "", ""],
+        "link_labels": [""],
+        "link_urls": [""],
     }
     venue_options = "".join(f'<option value="{esc(row["name"])}">' for row in venues)
     body = f"""
@@ -881,6 +963,10 @@ def page_entry_detail(environ, start_response, entry_id):
         f"<li>{esc(row['item_name'])} {'<a href=\"' + esc(row['item_url']) + '\" target=\"_blank\" rel=\"noreferrer\">link</a>' if row['item_url'] else ''} {esc(row['notes'])}</li>"
         for row in loaded["purchases"]
     ) or "<li>なし</li>"
+    links = "".join(
+        f'<li>{esc(row["label"])}: <a href="{esc(row["url"])}" target="_blank" rel="noreferrer">{esc(row["url"])}</a></li>'
+        for row in loaded["links"]
+    ) or "<li>なし</li>"
     actions = ""
     if is_authenticated(environ):
         actions = f"""
@@ -909,10 +995,7 @@ def page_entry_detail(environ, start_response, entry_id):
       </section>
       <section>
         <h2>リンク</h2>
-        <ul>
-          <li>Blog: {f'<a href="{esc(entry["blog_url"])}" target="_blank" rel="noreferrer">{esc(entry["blog_url"])}</a>' if entry["blog_url"] else 'なし'}</li>
-          <li>Flickr: {f'<a href="{esc(entry["flickr_url"])}" target="_blank" rel="noreferrer">{esc(entry["flickr_url"])}</a>' if entry["flickr_url"] else 'なし'}</li>
-        </ul>
+        <ul>{links}</ul>
       </section>
       <section>
         <h2>メモ</h2>

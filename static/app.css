@@ -315,7 +315,8 @@ a.typed-link:focus-visible {
 }
 
 .artist-row,
-.purchase-row {
+.purchase-row,
+.link-row {
   display: grid;
   gap: 8px;
   margin-bottom: 8px;
@@ -327,6 +328,10 @@ a.typed-link:focus-visible {
 
 .purchase-row {
   grid-template-columns: 1.3fr 1.3fr 1fr;
+}
+
+.link-row {
+  grid-template-columns: 1fr 2fr;
 }
 
 .pill {
@@ -350,7 +355,8 @@ a.typed-link:focus-visible {
   .nav,
   .actions,
   .artist-row,
-  .purchase-row {
+  .purchase-row,
+  .link-row {
     display: block;
   }
 
@@ -359,7 +365,8 @@ a.typed-link:focus-visible {
   }
 
   .artist-row input,
-  .purchase-row input {
+  .purchase-row input,
+  .link-row input {
     margin-bottom: 8px;
   }
 }

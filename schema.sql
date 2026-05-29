@@ -21,8 +21,6 @@ CREATE TABLE IF NOT EXISTS entries (
   title TEXT,
   venue_id INTEGER NOT NULL REFERENCES venues(id) ON DELETE RESTRICT,
   notes TEXT,
-  blog_url TEXT,
-  flickr_url TEXT,
   visibility TEXT NOT NULL DEFAULT 'private',
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -46,8 +44,17 @@ CREATE TABLE IF NOT EXISTS purchases (
   display_order INTEGER NOT NULL DEFAULT 1
 );
 
+CREATE TABLE IF NOT EXISTS entry_links (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  entry_id INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+  label TEXT NOT NULL,
+  url TEXT NOT NULL,
+  display_order INTEGER NOT NULL DEFAULT 1
+);
+
 CREATE INDEX IF NOT EXISTS idx_entries_event_date ON entries(event_date DESC);
 CREATE INDEX IF NOT EXISTS idx_artists_name ON artists(name);
 CREATE INDEX IF NOT EXISTS idx_venues_name ON venues(name);
 CREATE INDEX IF NOT EXISTS idx_entry_artists_artist_entry ON entry_artists(artist_id, entry_id);
 CREATE INDEX IF NOT EXISTS idx_purchases_entry_display ON purchases(entry_id, display_order);
+CREATE INDEX IF NOT EXISTS idx_entry_links_entry_display ON entry_links(entry_id, display_order);
