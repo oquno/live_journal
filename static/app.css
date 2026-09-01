@@ -346,16 +346,20 @@ a.typed-link:focus-visible {
 
 .candidate-row {
   display: flex !important;
-  grid-template-columns: none !important;
-  grid-template-rows: none !important;
-  grid-auto-flow: column;
-  grid-template-columns: auto 1fr !important;
   align-items: start;
   gap: 8px !important;
   padding: 8px 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #fff;
+}
+
+.entry-form .checkbox-label input[type="checkbox"],
+.entry-form .candidate-row input[type="checkbox"] {
+  width: auto;
+  min-width: 1rem;
+  flex: 0 0 auto;
+  margin: 0.2rem 0 0;
 }
 
 .source-card {

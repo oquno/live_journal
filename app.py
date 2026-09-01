@@ -820,9 +820,11 @@ def render_entry_form(values, action, submit_label, environ, errors=None):
     link_rows = []
     max_links = max(1, len(link_labels), len(link_titles), len(link_urls), len(link_candidate_ids))
     for idx in range(max_links):
+        candidate_id = link_candidate_ids[idx] if idx < len(link_candidate_ids) else ""
+        candidate_data_attr = f' data-candidate-id="{esc(candidate_id)}"' if candidate_id else ""
         link_rows.append(
             f"""
-            <div class="link-row">
+            <div class="link-row"{candidate_data_attr}>
               <input name="link_labels" value="{esc(link_labels[idx] if idx < len(link_labels) else '')}" placeholder="ラベル">
               <input name="link_titles" value="{esc(link_titles[idx] if idx < len(link_titles) else '')}" placeholder="タイトル（任意）">
               <input type="url" name="link_urls" value="{esc(link_urls[idx] if idx < len(link_urls) else '')}" placeholder="URL">
@@ -919,13 +921,20 @@ def render_entry_form(values, action, submit_label, environ, errors=None):
         const linkFields = document.querySelector('#link-fields');
         const escapeHtml = (value) => String(value).replace(/[&<>\"']/g, (character) => ({{'&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', "'": '&#39;'}}[character]));
         const addCandidate = (candidate) => {{
-          if ([...linkFields.querySelectorAll('[name="link_candidate_ids"]')].some((input) => input.value === String(candidate.id))) return;
+          const candidateId = String(candidate.id);
+          if ([...linkFields.querySelectorAll('[name="link_candidate_ids"]')].some((input) => input.value === candidateId)) return;
           const row = document.querySelector('#link-row-template').content.firstElementChild.cloneNode(true);
+          row.dataset.candidateId = candidateId;
           row.querySelector('[name="link_labels"]').value = candidate.kind === 'flickr' ? 'Flickr' : 'Blog';
           row.querySelector('[name="link_titles"]').value = candidate.title;
           row.querySelector('[name="link_urls"]').value = candidate.url;
-          row.querySelector('[name="link_candidate_ids"]').value = candidate.id;
+          row.querySelector('[name="link_candidate_ids"]').value = candidateId;
           linkFields.appendChild(row);
+        }};
+        const removeCandidate = (candidate) => {{
+          const candidateId = String(candidate.id);
+          [...linkFields.querySelectorAll('.link-row[data-candidate-id]')]
+            .find((row) => row.dataset.candidateId === candidateId)?.remove();
         }};
         if (candidateButton) candidateButton.addEventListener('click', async () => {{
           if (!eventDate.value) {{
@@ -951,12 +960,10 @@ def render_entry_form(values, action, submit_label, environ, errors=None):
               checkbox.addEventListener('change', () => {{
                 const candidate = data.candidates.find((item) => String(item.id) === checkbox.dataset.candidateId);
                 if (checkbox.checked) addCandidate(candidate);
+                else removeCandidate(candidate);
               }});
             }});
             data.candidates.filter((candidate) => candidate.exact).forEach((candidate) => addCandidate(candidate));
-            candidateContainer.querySelectorAll('input[type="checkbox"]').forEach((checkbox) => {{
-              if (checkbox.checked) checkbox.disabled = true;
-            }});
           }} catch (error) {{
             candidateContainer.textContent = error.message;
           }}
