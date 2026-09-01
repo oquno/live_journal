@@ -283,7 +283,43 @@ UI 方針:
 - entry_id
 - label
 - url
+- title（任意）
+- source_candidate_id（任意）
 - display_order
+
+#### link_sources
+
+関連リンク候補を取得する外部リンク元の設定。
+
+- id
+- kind（blog / flickr）
+- name
+- feed_url
+- account_url
+- flickr_user_id
+- enabled
+- last_fetched_at
+- last_error
+
+#### link_candidates
+
+外部リンク元から取得した候補。保存時に選択した候補は `entry_links` としてエントリーへコピーする。
+
+- id
+- source_id
+- external_id
+- title
+- url
+- published_at
+- fetched_at
+
+#### app_settings
+
+アプリ全体の設定。Flickr API key は設定画面から保存できる。
+
+- key
+- value
+- updated_at
 
 #### artists
 
@@ -554,6 +590,7 @@ MVP では HTML フォーム POST 中心でよい。SPA 化は不要。
 ## 18. 将来拡張
 
 - Last.fm, Flickr, Scrapbox の自動補完
+- ブログ RSS/Atom と Flickr アルバムの候補取得・半自動関連付け
 - 演者別・会場別の統計
 - 年ごとの振り返り
 - 購入物の横断検索

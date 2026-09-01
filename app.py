@@ -1,13 +1,22 @@
 import html
 import hashlib
 import hmac
+import ipaddress
+import json
 import os
+import re
 import secrets
+import socket
 import sqlite3
-from datetime import datetime
+import unicodedata
+from datetime import datetime, timezone
 from http import cookies
-from urllib.parse import parse_qs, quote, unquote, urlencode
+from email.utils import parsedate_to_datetime
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 from wsgiref.simple_server import make_server
+import xml.etree.ElementTree as ET
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -19,6 +28,9 @@ APP_MODE = os.environ.get("LIVE_JOURNAL_MODE", "private")
 ADMIN_USER = os.environ.get("LIVE_JOURNAL_USER", "admin")
 ADMIN_PASSWORD = os.environ.get("LIVE_JOURNAL_PASSWORD")
 ENTRY_PAGE_SIZE = 50
+EXTERNAL_FETCH_TIMEOUT = 10
+EXTERNAL_FETCH_MAX_BYTES = 2 * 1024 * 1024
+LINK_CANDIDATE_DATE_WINDOW = 7
 SESSION_SECRET_PATH = os.environ.get(
     "LIVE_JOURNAL_SESSION_SECRET_FILE",
     os.path.join(BASE_DIR, "data", "session_secret"),
@@ -69,6 +81,7 @@ def init_db():
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(entry_artists)").fetchall()}
     if "seen_count_override" not in columns:
         conn.execute("ALTER TABLE entry_artists ADD COLUMN seen_count_override INTEGER")
+    migrate_external_link_schema(conn)
     migrate_legacy_entry_links(conn)
     conn.commit()
     conn.close()
@@ -93,6 +106,36 @@ def migrate_legacy_entry_links(conn):
             """,
             (label, display_order),
         )
+
+
+def migrate_external_link_schema(conn):
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(entry_links)").fetchall()}
+    for column, definition in (
+        ("title", "TEXT"),
+        ("source_candidate_id", "INTEGER"),
+    ):
+        if column not in columns:
+            conn.execute(f"ALTER TABLE entry_links ADD COLUMN {column} {definition}")
+
+
+def get_app_setting(conn, key, default=""):
+    row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_app_setting(conn, key, value):
+    conn.execute(
+        """
+        INSERT INTO app_settings(key, value, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+        """,
+        (key, value),
+    )
+
+
+def delete_app_setting(conn, key):
+    conn.execute("DELETE FROM app_settings WHERE key = ?", (key,))
 
 
 def slugify(text):
@@ -146,6 +189,283 @@ def url_ok(value):
 def safe_external_url(value):
     value = (value or "").strip()
     return value if url_ok(value) else ""
+
+
+def external_url_allowed(value):
+    value = (value or "").strip()
+    parsed = urlparse(value)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return False
+    try:
+        addresses = {
+            info[4][0]
+            for info in socket.getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80))
+        }
+    except socket.gaierror:
+        return False
+    return all(
+        not (
+            ipaddress.ip_address(address).is_private
+            or ipaddress.ip_address(address).is_loopback
+            or ipaddress.ip_address(address).is_link_local
+            or ipaddress.ip_address(address).is_multicast
+            or ipaddress.ip_address(address).is_reserved
+            or ipaddress.ip_address(address).is_unspecified
+        )
+        for address in addresses
+    )
+
+
+class SafeRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, request, file, code, message, headers, new_url):
+        if not external_url_allowed(new_url):
+            raise ValueError("外部 URL のリダイレクト先が許可されていません。")
+        return super().redirect_request(request, file, code, message, headers, new_url)
+
+
+SAFE_EXTERNAL_OPENER = build_opener(SafeRedirectHandler)
+
+
+def fetch_external_bytes(url):
+    if not external_url_allowed(url):
+        raise ValueError("外部 URL は http/https の公開ホストである必要があります。")
+    request = Request(url, headers={"User-Agent": "LiveJournal/1.0"})
+    with SAFE_EXTERNAL_OPENER.open(request, timeout=EXTERNAL_FETCH_TIMEOUT) as response:
+        content_length = response.headers.get("Content-Length")
+        if content_length and int(content_length) > EXTERNAL_FETCH_MAX_BYTES:
+            raise ValueError("取得するデータが大きすぎます。")
+        chunks = []
+        total = 0
+        while True:
+            chunk = response.read(64 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > EXTERNAL_FETCH_MAX_BYTES:
+                raise ValueError("取得するデータが大きすぎます。")
+            chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def external_date(value):
+    value = (value or "").strip()
+    if not value:
+        return None
+    try:
+        if value.isdigit():
+            return datetime.fromtimestamp(int(value), tz=timezone.utc).date().isoformat()
+        parsed = parsedate_to_datetime(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).date().isoformat()
+    except (TypeError, ValueError, OverflowError):
+        try:
+            normalized = value.replace("Z", "+00:00")
+            parsed = datetime.fromisoformat(normalized)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc).date().isoformat()
+        except (TypeError, ValueError):
+            return None
+
+
+def xml_child_text(node, local_name):
+    for child in list(node):
+        if child.tag.rsplit("}", 1)[-1] == local_name:
+            return "".join(child.itertext()).strip()
+    return ""
+
+
+def parse_feed(data):
+    root = ET.fromstring(data)
+    nodes = [node for node in root.iter() if node.tag.rsplit("}", 1)[-1] in ("item", "entry")]
+    candidates = []
+    for node in nodes:
+        title = xml_child_text(node, "title")
+        link = ""
+        external_id = ""
+        published = ""
+        for child in list(node):
+            local_name = child.tag.rsplit("}", 1)[-1]
+            if local_name == "link":
+                candidate_link = child.attrib.get("href", "") or "".join(child.itertext()).strip()
+                if not link or child.attrib.get("rel") == "alternate":
+                    link = candidate_link
+            elif local_name in ("guid", "id") and not external_id:
+                external_id = "".join(child.itertext()).strip()
+            elif local_name in ("pubDate", "published", "updated", "date") and not published:
+                published = "".join(child.itertext()).strip()
+        if not external_id:
+            external_id = link
+        if title and url_ok(link) and external_id:
+            candidates.append(
+                {"external_id": external_id, "title": title, "url": link, "published_at": external_date(published)}
+            )
+    return candidates
+
+
+def flickr_api_call(method, params, api_key=None):
+    api_key = (api_key or "").strip()
+    if not api_key:
+        raise ValueError("Flickr API key が設定されていません。")
+    query = {"method": method, "api_key": api_key, "format": "json", "nojsoncallback": "1"}
+    query.update(params)
+    url = "https://api.flickr.com/services/rest/?" + urlencode(query)
+    payload = json.loads(fetch_external_bytes(url).decode("utf-8"))
+    if payload.get("stat") != "ok":
+        message = payload.get("message") or "Flickr API の取得に失敗しました。"
+        raise ValueError(message)
+    return payload
+
+
+def flickr_text(value):
+    if isinstance(value, dict):
+        return str(value.get("_content", ""))
+    return str(value or "")
+
+
+def flickr_candidates(source, api_key=None):
+    user_id = (source["flickr_user_id"] or "").strip()
+    account_url = (source["account_url"] or "").strip().rstrip("/")
+    if not user_id:
+        if not account_url:
+            raise ValueError("Flickr アカウント URL またはユーザー ID が必要です。")
+        user = flickr_api_call("flickr.urls.lookupUser", {"url": account_url}, api_key)
+        user_id = user["user"]["id"]
+    payload = flickr_api_call(
+        "flickr.photosets.getList",
+        {"user_id": user_id, "per_page": "500", "primary_photo_extras": "date_upload,date_taken"},
+        api_key,
+    )
+    candidates = []
+    for photoset in payload.get("photosets", {}).get("photoset", []):
+        set_id = str(photoset.get("id", "")).strip()
+        title = flickr_text(photoset.get("title", "")).strip()
+        if not set_id or not title:
+            continue
+        url = f"{account_url}/sets/{set_id}" if account_url else f"https://www.flickr.com/photos/{user_id}/sets/{set_id}"
+        candidates.append(
+            {
+                "external_id": set_id,
+                "title": title,
+                "url": url,
+                "published_at": external_date(photoset.get("date_create") or photoset.get("date_update")),
+            }
+        )
+    return candidates, user_id
+
+
+def refresh_link_source(conn, source_id):
+    source = conn.execute("SELECT * FROM link_sources WHERE id = ?", (source_id,)).fetchone()
+    if source is None:
+        return False, "リンク元が見つかりません。"
+    try:
+        resolved_user_id = source["flickr_user_id"]
+        if source["kind"] == "blog":
+            candidates = parse_feed(fetch_external_bytes(source["feed_url"]))
+        else:
+            api_key = get_app_setting(conn, "flickr_api_key")
+            candidates, resolved_user_id = flickr_candidates(source, api_key)
+        for candidate in candidates:
+            conn.execute(
+                """
+                INSERT INTO link_candidates(source_id, external_id, title, url, published_at, fetched_at)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(source_id, external_id) DO UPDATE SET
+                  title = excluded.title,
+                  url = excluded.url,
+                  published_at = excluded.published_at,
+                  fetched_at = CURRENT_TIMESTAMP
+                """,
+                (source_id, candidate["external_id"], candidate["title"], candidate["url"], candidate["published_at"]),
+            )
+        conn.execute(
+            """
+            UPDATE link_sources
+            SET flickr_user_id = ?, last_fetched_at = CURRENT_TIMESTAMP, last_error = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (resolved_user_id, source_id),
+        )
+        conn.commit()
+        return True, f"{len(candidates)} 件の候補を更新しました。"
+    except (ET.ParseError, HTTPError, URLError, OSError, ValueError, KeyError, json.JSONDecodeError) as error:
+        conn.execute(
+            "UPDATE link_sources SET last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (str(error), source_id),
+        )
+        conn.commit()
+        return False, f"取得に失敗しました: {error}"
+
+
+def normalize_match_text(value):
+    value = unicodedata.normalize("NFKC", value or "")
+    return " ".join(value.casefold().split())
+
+
+def split_candidate_title(kind, title):
+    title = (title or "").strip()
+    date = None
+    if kind == "flickr":
+        match = re.match(r"^(\d{4})[/-](\d{1,2})[/-](\d{1,2})\s+(.+)$", title)
+        if match:
+            try:
+                date = datetime(int(match.group(1)), int(match.group(2)), int(match.group(3))).date().isoformat()
+                title = match.group(4).strip()
+            except ValueError:
+                pass
+    if "@" not in title:
+        return date, "", ""
+    event_title, venue = title.rsplit("@", 1)
+    return date, normalize_match_text(event_title), normalize_match_text(venue)
+
+
+def link_candidate_matches(conn, event_date, event_title, venue):
+    try:
+        event_day = datetime.strptime(event_date, "%Y-%m-%d").date()
+    except ValueError:
+        return []
+    expected_title = normalize_match_text(event_title)
+    expected_venue = normalize_match_text(venue)
+    rows = conn.execute(
+        """
+        SELECT c.*, s.kind, s.name AS source_name
+        FROM link_candidates c
+        JOIN link_sources s ON s.id = c.source_id
+        WHERE s.enabled = 1
+        ORDER BY c.published_at DESC, c.id DESC
+        """
+    ).fetchall()
+    matches = []
+    for row in rows:
+        flickr_date, candidate_title, candidate_venue = split_candidate_title(row["kind"], row["title"])
+        pair_match = bool(expected_title and expected_venue and candidate_title == expected_title and candidate_venue == expected_venue)
+        candidate_day = flickr_date or row["published_at"]
+        distance = None
+        if candidate_day:
+            try:
+                distance = abs((datetime.strptime(candidate_day, "%Y-%m-%d").date() - event_day).days)
+            except ValueError:
+                pass
+        if not pair_match and (distance is None or distance > LINK_CANDIDATE_DATE_WINDOW):
+            continue
+        score = 100 if pair_match else 20
+        if distance is not None:
+            score += max(0, LINK_CANDIDATE_DATE_WINDOW - distance)
+        matches.append(
+            {
+                "id": row["id"],
+                "kind": row["kind"],
+                "source_name": row["source_name"],
+                "title": row["title"],
+                "url": row["url"],
+                "published_at": row["published_at"],
+                "score": score,
+                "exact": pair_match and (row["kind"] != "flickr" or flickr_date == event_date),
+            }
+        )
+    return sorted(matches, key=lambda item: (-item["score"], item["title"]))[:100]
 
 
 def parse_body(environ):
@@ -308,6 +628,11 @@ def response_html(start_response, body, status="200 OK", headers=None):
     return [body.encode("utf-8")]
 
 
+def response_json(start_response, payload, status="200 OK"):
+    start_response(status, [("Content-Type", "application/json; charset=utf-8")])
+    return [json.dumps(payload, ensure_ascii=False).encode("utf-8")]
+
+
 def response_not_found(start_response):
     return response_html(start_response, layout("Not Found", "<h1>Not Found</h1>"), "404 Not Found")
 
@@ -325,6 +650,7 @@ def nav(environ):
     links = ['<a href="/">Entries</a>']
     if auth:
         links.append('<a href="/entries/new">New Entry</a>')
+        links.append('<a href="/settings/links">Link Sources</a>')
     if auth:
         links.append(
             f'<form method="post" action="/logout" class="inline-form">{csrf_input(environ)}<button type="submit">Logout</button></form>'
@@ -456,7 +782,9 @@ def render_entry_form(values, action, submit_label, environ, errors=None):
     purchase_urls = values.get("purchase_urls", [""])
     purchase_notes = values.get("purchase_notes", [""])
     link_labels = values.get("link_labels", [""])
+    link_titles = values.get("link_titles", [""])
     link_urls = values.get("link_urls", [""])
+    link_candidate_ids = values.get("link_candidate_ids", [""])
     error_block = ""
     if errors:
         items = "".join(f"<li>{esc(error)}</li>" for error in errors)
@@ -490,13 +818,15 @@ def render_entry_form(values, action, submit_label, environ, errors=None):
     purchase_block = "".join(purchase_rows)
 
     link_rows = []
-    max_links = max(1, len(link_labels), len(link_urls))
+    max_links = max(1, len(link_labels), len(link_titles), len(link_urls), len(link_candidate_ids))
     for idx in range(max_links):
         link_rows.append(
             f"""
             <div class="link-row">
               <input name="link_labels" value="{esc(link_labels[idx] if idx < len(link_labels) else '')}" placeholder="ラベル">
+              <input name="link_titles" value="{esc(link_titles[idx] if idx < len(link_titles) else '')}" placeholder="タイトル（任意）">
               <input type="url" name="link_urls" value="{esc(link_urls[idx] if idx < len(link_urls) else '')}" placeholder="URL">
+              <input type="hidden" name="link_candidate_ids" value="{esc(link_candidate_ids[idx] if idx < len(link_candidate_ids) else '')}">
             </div>
             """
         )
@@ -521,6 +851,9 @@ def render_entry_form(values, action, submit_label, environ, errors=None):
           {link_block}
         </div>
         <button type="button" class="secondary-button" data-add-link>関連リンクを追加</button>
+        <button type="button" class="secondary-button" data-load-link-candidates>候補を読み込む</button>
+        <div id="link-candidates" class="link-candidates" aria-live="polite"></div>
+        <p class="hint">ブログは「イベント名@会場名」、Flickr は「yyyy/MM/dd イベント名@会場名」と一致する候補を優先します。</p>
       </fieldset>
       <fieldset>
         <legend>演者</legend>
@@ -559,7 +892,9 @@ def render_entry_form(values, action, submit_label, environ, errors=None):
     <template id="link-row-template">
       <div class="link-row">
         <input name="link_labels" value="" placeholder="ラベル">
+        <input name="link_titles" value="" placeholder="タイトル（任意）">
         <input type="url" name="link_urls" value="" placeholder="URL">
+        <input type="hidden" name="link_candidate_ids" value="">
       </div>
     </template>
     <script>
@@ -576,6 +911,56 @@ def render_entry_form(values, action, submit_label, environ, errors=None):
         addRow('[data-add-artist]', '#artist-fields', '#artist-row-template');
         addRow('[data-add-purchase]', '#purchase-fields', '#purchase-row-template');
         addRow('[data-add-link]', '#link-fields', '#link-row-template');
+        const candidateButton = document.querySelector('[data-load-link-candidates]');
+        const candidateContainer = document.querySelector('#link-candidates');
+        const eventDate = document.querySelector('[name="event_date"]');
+        const eventTitle = document.querySelector('[name="title"]');
+        const venue = document.querySelector('[name="venue"]');
+        const linkFields = document.querySelector('#link-fields');
+        const escapeHtml = (value) => String(value).replace(/[&<>\"']/g, (character) => ({{'&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', "'": '&#39;'}}[character]));
+        const addCandidate = (candidate) => {{
+          if ([...linkFields.querySelectorAll('[name="link_candidate_ids"]')].some((input) => input.value === String(candidate.id))) return;
+          const row = document.querySelector('#link-row-template').content.firstElementChild.cloneNode(true);
+          row.querySelector('[name="link_labels"]').value = candidate.kind === 'flickr' ? 'Flickr' : 'Blog';
+          row.querySelector('[name="link_titles"]').value = candidate.title;
+          row.querySelector('[name="link_urls"]').value = candidate.url;
+          row.querySelector('[name="link_candidate_ids"]').value = candidate.id;
+          linkFields.appendChild(row);
+        }};
+        if (candidateButton) candidateButton.addEventListener('click', async () => {{
+          if (!eventDate.value) {{
+            candidateContainer.textContent = '先に開催日を入力してください。';
+            return;
+          }}
+          candidateContainer.textContent = '候補を読み込んでいます…';
+          const query = new URLSearchParams({{event_date: eventDate.value, title: eventTitle.value, venue: venue.value}});
+          try {{
+            const response = await fetch('/api/link-candidates?' + query.toString());
+            if (!response.ok) throw new Error('候補の取得に失敗しました。');
+            const data = await response.json();
+            if (!data.candidates.length) {{
+              candidateContainer.textContent = '一致する候補がありません。各リンク元の「今すぐ更新」と手動リンクをお試しください。';
+              return;
+            }}
+            candidateContainer.innerHTML = data.candidates.map((candidate) => `
+              <label class="candidate-row">
+                <input type="checkbox" data-candidate-id="${{candidate.id}}" ${{candidate.exact ? 'checked' : ''}}>
+                <span><strong>${{escapeHtml(candidate.source_name)}}</strong> ${{candidate.exact ? '（自動一致）' : '（参考候補）'}}<br>${{escapeHtml(candidate.title)}}</span>
+              </label>`).join('');
+            candidateContainer.querySelectorAll('input[type="checkbox"]').forEach((checkbox) => {{
+              checkbox.addEventListener('change', () => {{
+                const candidate = data.candidates.find((item) => String(item.id) === checkbox.dataset.candidateId);
+                if (checkbox.checked) addCandidate(candidate);
+              }});
+            }});
+            data.candidates.filter((candidate) => candidate.exact).forEach((candidate) => addCandidate(candidate));
+            candidateContainer.querySelectorAll('input[type="checkbox"]').forEach((checkbox) => {{
+              if (checkbox.checked) checkbox.disabled = true;
+            }});
+          }} catch (error) {{
+            candidateContainer.textContent = error.message;
+          }}
+        }});
       }})();
     </script>
     """
@@ -593,7 +978,9 @@ def collect_form_values(params):
         "purchase_urls": params.get("purchase_urls", [""]),
         "purchase_notes": params.get("purchase_notes", [""]),
         "link_labels": params.get("link_labels", [""]),
+        "link_titles": params.get("link_titles", [""]),
         "link_urls": params.get("link_urls", [""]),
+        "link_candidate_ids": params.get("link_candidate_ids", [""]),
     }
 
 
@@ -620,7 +1007,7 @@ def validate_entry_form(values):
         if not count.isdigit() or int(count) <= 0:
             errors.append("何回目かは 1 以上の整数で入力してください。")
             break
-    link_count = max(len(values["link_labels"]), len(values["link_urls"]))
+    link_count = max(len(values["link_labels"]), len(values.get("link_titles", [])), len(values["link_urls"]))
     for idx in range(link_count):
         label = values["link_labels"][idx].strip() if idx < len(values["link_labels"]) else ""
         link_url = values["link_urls"][idx].strip() if idx < len(values["link_urls"]) else ""
@@ -706,20 +1093,24 @@ def save_entry(conn, values, entry_id=None):
         order += 1
 
     link_labels = values["link_labels"]
+    link_titles = values.get("link_titles", [])
     link_urls = values["link_urls"]
-    link_count = max(len(link_labels), len(link_urls))
+    link_candidate_ids = values.get("link_candidate_ids", [])
+    link_count = max(len(link_labels), len(link_titles), len(link_urls), len(link_candidate_ids))
     link_order = 1
     for idx in range(link_count):
         label = link_labels[idx].strip() if idx < len(link_labels) else ""
+        link_title = link_titles[idx].strip() if idx < len(link_titles) else ""
         link_url = link_urls[idx].strip() if idx < len(link_urls) else ""
+        candidate_id = link_candidate_ids[idx].strip() if idx < len(link_candidate_ids) else ""
         if not any([label, link_url]):
             continue
         conn.execute(
             """
-            INSERT INTO entry_links(entry_id, label, url, display_order)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO entry_links(entry_id, label, url, title, source_candidate_id, display_order)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (entry_id, label, link_url, link_order),
+            (entry_id, label, link_url, link_title, int(candidate_id) if candidate_id.isdigit() else None, link_order),
         )
         link_order += 1
 
@@ -743,7 +1134,9 @@ def load_entry_form_values(conn, entry_id):
         "purchase_urls": [row["item_url"] or "" for row in loaded["purchases"]] or [""],
         "purchase_notes": [row["notes"] or "" for row in loaded["purchases"]] or [""],
         "link_labels": [row["label"] for row in loaded["links"]] or [""],
+        "link_titles": [row["title"] or "" for row in loaded["links"]] or [""],
         "link_urls": [row["url"] for row in loaded["links"]] or [""],
+        "link_candidate_ids": [str(row["source_candidate_id"] or "") for row in loaded["links"]] or [""],
     }
     return values
 
@@ -950,6 +1343,287 @@ def require_auth(environ, start_response):
     return True
 
 
+def link_source_values(params):
+    return {
+        "kind": first(params, "kind", "blog"),
+        "name": first(params, "name"),
+        "feed_url": first(params, "feed_url"),
+        "account_url": first(params, "account_url"),
+        "flickr_user_id": first(params, "flickr_user_id"),
+        "enabled": "1" if first(params, "enabled") == "1" else "0",
+    }
+
+
+def validate_link_source(values):
+    errors = []
+    if values["kind"] not in ("blog", "flickr"):
+        errors.append("リンク元の種類が不正です。")
+    if not values["name"].strip():
+        errors.append("表示名を入力してください。")
+    if values["kind"] == "blog":
+        if not values["feed_url"].strip():
+            errors.append("ブログの RSS/Atom URL を入力してください。")
+        elif not url_ok(values["feed_url"].strip()):
+            errors.append("フィード URL は http/https の URL を入力してください。")
+    if values["kind"] == "flickr":
+        if values["account_url"].strip() and not url_ok(values["account_url"].strip()):
+            errors.append("Flickr アカウント URL は http/https の URL を入力してください。")
+        if not values["account_url"].strip() and not values["flickr_user_id"].strip():
+            errors.append("Flickr アカウント URL またはユーザー ID を入力してください。")
+    return errors
+
+
+def render_link_source_fields(values):
+    kind = values.get("kind", "blog")
+    enabled = " checked" if values.get("enabled", "1") == "1" else ""
+    return f"""
+      <label>種類
+        <select name="kind" data-source-kind-select>
+          <option value="blog"{' selected' if kind == 'blog' else ''}>ブログ RSS/Atom</option>
+          <option value="flickr"{' selected' if kind == 'flickr' else ''}>Flickr アルバム</option>
+        </select>
+      </label>
+      <label>表示名
+        <input name="name" value="{esc(values.get('name', ''))}" placeholder="個人ブログ">
+      </label>
+      <div class="source-field-group" data-source-kind-group="blog">
+        <label>ブログの RSS/Atom URL
+          <input type="url" name="feed_url" value="{esc(values.get('feed_url', ''))}" placeholder="https://example.com/feed">
+        </label>
+        <p class="hint">ブログ記事タイトルは「イベント名@会場名」の形式で照合します。</p>
+      </div>
+      <div class="source-field-group" data-source-kind-group="flickr">
+        <label>Flickr アカウント URL
+          <input type="url" name="account_url" value="{esc(values.get('account_url', ''))}" placeholder="https://www.flickr.com/photos/example/">
+        </label>
+        <label>Flickr ユーザー ID（NSID、任意）
+          <input name="flickr_user_id" value="{esc(values.get('flickr_user_id', ''))}" placeholder="未入力なら API で解決">
+        </label>
+        <p class="hint">アルバムタイトルは「yyyy/MM/dd イベント名@会場名」の形式で照合します。</p>
+      </div>
+      <label class="checkbox-label"><input type="checkbox" name="enabled" value="1"{enabled}> 有効</label>
+    """
+
+
+def render_flickr_api_key_form(environ, configured):
+    status = "設定済み" if configured else "未設定"
+    return f"""
+    <section class="source-card api-key-card">
+      <h2>Flickr API key</h2>
+      <p>現在の状態: <strong>{status}</strong>。この key はすべての Flickr リンク元で共有します。</p>
+      <p class="external-help">API key は <a href="https://www.flickr.com/services/apps/" target="_blank" rel="noopener noreferrer">Flickr App Garden でアプリを作成して取得</a>します。</p>
+      <ol class="help-list">
+        <li>Flickr にログインして App Garden を開く</li>
+        <li>アプリを作成し、表示された API key をコピーする</li>
+        <li>下の欄に貼り付けて保存する</li>
+      </ol>
+      <p class="hint">入力欄は既存の key を表示しません。空欄で保存すると現在値を維持します。</p>
+      <form method="post" action="/settings/flickr-api-key" class="entry-form">
+        {csrf_input(environ)}
+        <label>API key
+          <input type="password" name="flickr_api_key" value="" autocomplete="new-password" placeholder="Flickr App Garden で取得した API key">
+        </label>
+        <label class="checkbox-label"><input type="checkbox" name="clear_flickr_api_key" value="1"> 保存済みの API key を削除する</label>
+        <button type="submit">API key を保存</button>
+      </form>
+    </section>
+    """
+
+
+def page_link_settings(environ, start_response, values=None, errors=None):
+    if not require_auth(environ, start_response):
+        return [b""]
+    conn = get_db()
+    sources = conn.execute("SELECT * FROM link_sources ORDER BY kind, name, id").fetchall()
+    flickr_key_configured = bool(get_app_setting(conn, "flickr_api_key"))
+    conn.close()
+    errors = errors or []
+    error_block = ""
+    if errors:
+        error_block = '<div class="flash error"><ul>' + "".join(f"<li>{esc(error)}</li>" for error in errors) + "</ul></div>"
+    source_blocks = []
+    for source in sources:
+        source_values = dict(source)
+        source_values["enabled"] = "1" if source["enabled"] else "0"
+        last_status = "未取得"
+        if source["last_fetched_at"]:
+            last_status = f"最終取得: {esc(source['last_fetched_at'])}"
+        if source["last_error"]:
+            last_status += f" / <span class=\"source-error\">{esc(source['last_error'])}</span>"
+        source_blocks.append(
+            f"""
+            <section class="source-card">
+              <form method="post" action="/settings/links/{source['id']}" class="entry-form">
+                {csrf_input(environ)}
+                {render_link_source_fields(source_values)}
+                <div class="actions"><button type="submit">設定を更新</button></div>
+              </form>
+              <p class="source-status">{last_status}</p>
+              <div class="actions">
+                <form method="post" action="/settings/links/{source['id']}/refresh" class="inline-form">{csrf_input(environ)}<button type="submit" class="secondary-button">今すぐ更新</button></form>
+                <form method="post" action="/settings/links/{source['id']}/delete" class="inline-form" onsubmit="return confirm('このリンク元を削除しますか?');">{csrf_input(environ)}<button type="submit" class="danger">削除</button></form>
+              </div>
+            </section>
+            """
+        )
+    new_values = values or {"kind": "blog", "name": "", "feed_url": "", "account_url": "", "flickr_user_id": "", "enabled": "1"}
+    query = parse_query(environ)
+    message = first(query, "message")
+    body = f"""
+    <section class="single-column">
+      <h1>リンク元設定</h1>
+      <p class="muted">ブログや Flickr を登録してから「今すぐ更新」すると、エントリー作成時に候補を選べます。</p>
+      {error_block}
+      {render_flickr_api_key_form(environ, flickr_key_configured)}
+      {''.join(source_blocks) or '<p class="muted">リンク元はまだ登録されていません。</p>'}
+      <section class="source-card">
+        <h2>リンク元を追加</h2>
+        <form method="post" action="/settings/links" class="entry-form">
+          {csrf_input(environ)}
+          {render_link_source_fields(new_values)}
+          <button type="submit">追加</button>
+        </form>
+      </section>
+      <p class="hint">Flickr のアルバム取得には上の API key が必要です。ユーザー ID（NSID）が不明な場合はアカウント URL から解決します。</p>
+    </section>
+    <script>
+      (() => {{
+        const updateSourceFields = (select) => {{
+          const form = select.closest('form');
+          if (!form) return;
+          form.querySelectorAll('[data-source-kind-group]').forEach((group) => {{
+            group.hidden = group.dataset.sourceKindGroup !== select.value;
+          }});
+        }};
+        document.querySelectorAll('[data-source-kind-select]').forEach((select) => {{
+          updateSourceFields(select);
+          select.addEventListener('change', () => updateSourceFields(select));
+        }});
+      }})();
+    </script>
+    """
+    return response_html(start_response, layout("Link Sources", body, environ, message))
+
+
+def handle_update_flickr_api_key(environ, start_response):
+    if not require_auth(environ, start_response):
+        return [b""]
+    params = parse_body(environ)
+    if not verify_csrf(environ, params):
+        return response_forbidden(start_response)
+    conn = get_db()
+    if first(params, "clear_flickr_api_key") == "1":
+        delete_app_setting(conn, "flickr_api_key")
+        message = "Flickr API key を削除しました。"
+    elif first(params, "flickr_api_key").strip():
+        set_app_setting(conn, "flickr_api_key", first(params, "flickr_api_key").strip())
+        message = "Flickr API key を保存しました。"
+    else:
+        message = "Flickr API key は変更していません。"
+    conn.commit()
+    conn.close()
+    return redirect(start_response, "/settings/links?message=" + quote(message))
+
+
+def save_link_source(conn, values, source_id=None):
+    if source_id is None:
+        cur = conn.execute(
+            """
+            INSERT INTO link_sources(kind, name, feed_url, account_url, flickr_user_id, enabled, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (values["kind"], values["name"].strip(), values["feed_url"].strip(), values["account_url"].strip(), values["flickr_user_id"].strip(), int(values["enabled"] == "1")),
+        )
+        source_id = cur.lastrowid
+    else:
+        conn.execute(
+            "UPDATE entry_links SET source_candidate_id = NULL WHERE source_candidate_id IN (SELECT id FROM link_candidates WHERE source_id = ?)",
+            (source_id,),
+        )
+        conn.execute("DELETE FROM link_candidates WHERE source_id = ?", (source_id,))
+        conn.execute(
+            """
+            UPDATE link_sources
+            SET kind = ?, name = ?, feed_url = ?, account_url = ?, flickr_user_id = ?, enabled = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (values["kind"], values["name"].strip(), values["feed_url"].strip(), values["account_url"].strip(), values["flickr_user_id"].strip(), int(values["enabled"] == "1"), source_id),
+        )
+    conn.commit()
+    return source_id
+
+
+def handle_create_link_source(environ, start_response):
+    if not require_auth(environ, start_response):
+        return [b""]
+    params = parse_body(environ)
+    if not verify_csrf(environ, params):
+        return response_forbidden(start_response)
+    values = link_source_values(params)
+    errors = validate_link_source(values)
+    if errors:
+        return page_link_settings(environ, start_response, values, errors)
+    conn = get_db()
+    save_link_source(conn, values)
+    conn.close()
+    return redirect(start_response, "/settings/links?message=" + quote("リンク元を追加しました。"))
+
+
+def handle_update_link_source(environ, start_response, source_id):
+    if not require_auth(environ, start_response):
+        return [b""]
+    params = parse_body(environ)
+    if not verify_csrf(environ, params):
+        return response_forbidden(start_response)
+    values = link_source_values(params)
+    errors = validate_link_source(values)
+    if errors:
+        return page_link_settings(environ, start_response, values, errors)
+    conn = get_db()
+    if conn.execute("SELECT id FROM link_sources WHERE id = ?", (source_id,)).fetchone() is None:
+        conn.close()
+        return response_not_found(start_response)
+    save_link_source(conn, values, source_id)
+    conn.close()
+    return redirect(start_response, "/settings/links?message=" + quote("リンク元を更新しました。"))
+
+
+def handle_refresh_link_source(environ, start_response, source_id):
+    if not require_auth(environ, start_response):
+        return [b""]
+    params = parse_body(environ)
+    if not verify_csrf(environ, params):
+        return response_forbidden(start_response)
+    conn = get_db()
+    success, message = refresh_link_source(conn, source_id)
+    conn.close()
+    return redirect(start_response, "/settings/links?message=" + quote(message))
+
+
+def handle_delete_link_source(environ, start_response, source_id):
+    if not require_auth(environ, start_response):
+        return [b""]
+    params = parse_body(environ)
+    if not verify_csrf(environ, params):
+        return response_forbidden(start_response)
+    conn = get_db()
+    conn.execute("UPDATE entry_links SET source_candidate_id = NULL WHERE source_candidate_id IN (SELECT id FROM link_candidates WHERE source_id = ?)", (source_id,))
+    conn.execute("DELETE FROM link_sources WHERE id = ?", (source_id,))
+    conn.commit()
+    conn.close()
+    return redirect(start_response, "/settings/links?message=" + quote("リンク元を削除しました。"))
+
+
+def handle_link_candidate_api(environ, start_response):
+    if not is_authenticated(environ):
+        return response_json(start_response, {"error": "認証が必要です。"}, "403 Forbidden")
+    params = parse_query(environ)
+    conn = get_db()
+    candidates = link_candidate_matches(conn, first(params, "event_date"), first(params, "title"), first(params, "venue"))
+    conn.close()
+    return response_json(start_response, {"candidates": candidates})
+
+
 def page_new_entry(environ, start_response, values=None, errors=None):
     if not require_auth(environ, start_response):
         return [b""]
@@ -967,7 +1641,9 @@ def page_new_entry(environ, start_response, values=None, errors=None):
         "purchase_urls": ["", "", ""],
         "purchase_notes": ["", "", ""],
         "link_labels": [""],
+        "link_titles": [""],
         "link_urls": [""],
+        "link_candidate_ids": [""],
     }
     venue_options = "".join(f'<option value="{esc(row["name"])}">' for row in venues)
     body = f"""
@@ -1020,7 +1696,7 @@ def page_entry_detail(environ, start_response, entry_id):
         for row in loaded["purchases"]
     ) or "<li>なし</li>"
     links = "".join(
-        f'<li>{esc(row["label"])}: <a href="{esc(safe_external_url(row["url"]))}" target="_blank" rel="noreferrer">{esc(safe_external_url(row["url"]))}</a></li>'
+        f'<li>{esc(row["label"])}: <a href="{esc(safe_external_url(row["url"]))}" target="_blank" rel="noreferrer">{esc(row["title"] or safe_external_url(row["url"]))}</a></li>'
         for row in loaded["links"]
         if safe_external_url(row["url"])
     ) or "<li>なし</li>"
@@ -1239,6 +1915,14 @@ def application(environ, start_response):
         return page_new_entry(environ, start_response)
     if path == "/entries" and method == "POST":
         return handle_create_entry(environ, start_response)
+    if path == "/settings/links" and method == "GET":
+        return page_link_settings(environ, start_response)
+    if path == "/settings/links" and method == "POST":
+        return handle_create_link_source(environ, start_response)
+    if path == "/settings/flickr-api-key" and method == "POST":
+        return handle_update_flickr_api_key(environ, start_response)
+    if path == "/api/link-candidates" and method == "GET":
+        return handle_link_candidate_api(environ, start_response)
 
     parts = [part for part in path.split("/") if part]
     if len(parts) == 2 and parts[0] == "entries" and method == "GET":
@@ -1259,6 +1943,21 @@ def application(environ, start_response):
     if len(parts) == 3 and parts[0] == "entries" and parts[2] == "delete" and method == "POST":
         try:
             return handle_delete_entry(environ, start_response, int(parts[1]))
+        except ValueError:
+            return response_not_found(start_response)
+    if len(parts) == 3 and parts[0] == "settings" and parts[1] == "links" and method == "POST":
+        try:
+            return handle_update_link_source(environ, start_response, int(parts[2]))
+        except ValueError:
+            return response_not_found(start_response)
+    if len(parts) == 4 and parts[0] == "settings" and parts[1] == "links" and parts[3] == "refresh" and method == "POST":
+        try:
+            return handle_refresh_link_source(environ, start_response, int(parts[2]))
+        except ValueError:
+            return response_not_found(start_response)
+    if len(parts) == 4 and parts[0] == "settings" and parts[1] == "links" and parts[3] == "delete" and method == "POST":
+        try:
+            return handle_delete_link_source(environ, start_response, int(parts[2]))
         except ValueError:
             return response_not_found(start_response)
     if len(parts) == 2 and parts[0] == "artists" and method == "GET":

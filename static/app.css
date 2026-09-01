@@ -331,7 +331,71 @@ a.typed-link:focus-visible {
 }
 
 .link-row {
-  grid-template-columns: 1fr 2fr;
+  grid-template-columns: 1fr 1.5fr 2fr;
+}
+
+.link-row input[type="hidden"] {
+  display: none;
+}
+
+.link-candidates {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.candidate-row {
+  display: flex !important;
+  grid-template-columns: none !important;
+  grid-template-rows: none !important;
+  grid-auto-flow: column;
+  grid-template-columns: auto 1fr !important;
+  align-items: start;
+  gap: 8px !important;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.source-card {
+  padding: 16px;
+  margin: 12px 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+}
+
+.source-card h2 {
+  margin-top: 0;
+}
+
+.source-status {
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.source-error {
+  color: var(--danger);
+}
+
+.source-field-group[hidden] {
+  display: none;
+}
+
+.external-help {
+  margin: 10px 0;
+}
+
+.help-list {
+  margin: 8px 0 14px;
+  padding-left: 1.5rem;
+}
+
+.checkbox-label {
+  display: flex !important;
+  align-items: center;
+  grid-template-columns: none !important;
 }
 
 .pill {

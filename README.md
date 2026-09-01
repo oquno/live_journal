@@ -13,6 +13,7 @@
 - 1 件の記録に複数の演者を登録
 - 購入物を名前、URL、メモ付きで複数登録
 - ブログ、写真アルバムなどの関連リンクを、任意のラベル付きで複数登録
+- 事前登録したブログ RSS/Atom と Flickr アルバムから、イベント名・会場名・開催日に合う関連リンク候補を表示
 - 同名の演者や会場を既存データとして再利用
 
 ### 演者ごとの観覧回数
@@ -52,8 +53,9 @@
 ## 基本的な使い方
 
 1. 管理者としてログインする
-2. `New Entry` から開催日、会場、演者などを入力して保存する
-3. 一覧から記録を検索するか、演者名・会場名をクリックして履歴を振り返る
+2. `Link Sources` で Flickr API key を保存し、ブログの RSS/Atom URL や Flickr アカウントを登録して「今すぐ更新」を実行する
+3. `New Entry` で開催日、イベント名、会場、演者などを入力し、関連リンクの「候補を読み込む」から一致候補を選ぶ
+4. 保存後、一覧から記録を検索するか、演者名・会場名をクリックして履歴を振り返る
 
 ## 起動
 
@@ -93,6 +95,9 @@ gunicorn wsgi:application --bind 127.0.0.1:8000 --workers 2
 - `LIVE_JOURNAL_PASSWORD`: 管理者パスワード
 - `LIVE_JOURNAL_SESSION_SECRET`: セッション署名キー
 - `LIVE_JOURNAL_SESSION_SECRET_FILE`: 自動生成したセッション署名キーの保存先
+Flickr API key は [Flickr App Garden](https://www.flickr.com/services/apps/) でアプリを作成して取得します。
+取得後は `Link Sources` の `Flickr API key` 欄に保存してください。API key は SQLite データベースに保存されるため、
+データベースのバックアップやファイル権限を適切に管理してください。
 
 ## デプロイ
 
