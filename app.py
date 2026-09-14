@@ -645,25 +645,50 @@ def response_bad_request(start_response, message):
     return response_html(start_response, layout("Bad Request", f"<h1>Bad Request</h1><p>{esc(message)}</p>"), "400 Bad Request")
 
 
+def icon(name):
+    paths = {
+        "journal": '<path d="M4 5a2 2 0 0 1 2-2h14v18H6a2 2 0 0 1-2-2V5Z"/><path d="M4 17h16M9 7v5m4-7v9m4-6v3"/>',
+        "calendar": '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 11h18"/>',
+        "pin": '<path d="M20 10c0 6-8 12-8 12S4 16 4 10a8 8 0 1 1 16 0Z"/><circle cx="12" cy="10" r="2.5"/>',
+        "mic": '<rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8"/>',
+        "search": '<circle cx="10.5" cy="10.5" r="7"/><path d="m16 16 5 5"/>',
+        "plus": '<path d="M12 5v14M5 12h14"/>',
+        "arrow": '<path d="M5 12h14m-6-6 6 6-6 6"/>',
+    }
+    return (
+        '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+        'stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" '
+        f'aria-hidden="true" focusable="false">{paths[name]}</svg>'
+    )
+
+
 def nav(environ):
     auth = is_authenticated(environ)
-    links = ['<a href="/">Entries</a>']
+    path = environ.get("PATH_INFO", "/")
+    items = [("/", "記録一覧", "")]
     if auth:
-        links.append('<a href="/entries/new">New Entry</a>')
-        links.append('<a href="/settings/links">Link Sources</a>')
+        items.extend([
+            ("/settings/links", "リンク元", ""),
+            ("/entries/new", f'{icon("plus")}記録を追加', "nav-create"),
+        ])
+    links = []
+    for href, label, class_name in items:
+        current = ' aria-current="page"' if path == href else ""
+        links.append(f'<a href="{href}" class="{class_name}"{current}>{label}</a>')
     if auth:
         links.append(
-            f'<form method="post" action="/logout" class="inline-form">{csrf_input(environ)}<button type="submit">Logout</button></form>'
+            f'<form method="post" action="/logout" class="inline-form">{csrf_input(environ)}<button type="submit" class="nav-logout">ログアウト</button></form>'
         )
     else:
-        links.append('<a href="/login">Login</a>')
+        current = ' aria-current="page"' if path == "/login" else ""
+        links.append(f'<a href="/login"{current}>ログイン</a>')
     return "".join(f"<li>{item}</li>" for item in links)
 
 
 def flash_html(message):
     if not message:
         return ""
-    return f'<div class="flash">{esc(message)}</div>'
+    return f'<div class="flash" role="status">{esc(message)}</div>'
 
 
 def layout(title, content, environ=None, flash_message=""):
@@ -672,20 +697,23 @@ def layout(title, content, environ=None, flash_message=""):
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f6f8f7">
   <title>{esc(title)} - {esc(APP_TITLE)}</title>
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
+  <a class="skip-link" href="#main">本文へスキップ</a>
   <header class="site-header">
     <div class="wrap">
-      <div class="brand"><a href="/">{esc(APP_TITLE)}</a></div>
-      <nav><ul class="nav">{nav(environ) if environ else ''}</ul></nav>
+      <div class="brand"><a href="/"><span class="brand-mark">{icon('journal')}</span><span>{esc(APP_TITLE)}</span></a></div>
+      <nav aria-label="メインナビゲーション"><ul class="nav">{nav(environ) if environ else ''}</ul></nav>
     </div>
   </header>
-  <main class="wrap">
+  <main id="main" class="wrap" tabindex="-1">
     {flash_html(flash_message)}
     {content}
   </main>
+  <footer class="site-footer wrap"><span>{esc(APP_TITLE)}</span><span>音楽と、その日の記憶。</span></footer>
 </body>
 </html>"""
 
@@ -700,24 +728,31 @@ def render_entry_card(row):
                 continue
             artist_links.append(
                 f'<a class="typed-link artist-link" href="/artists/{url_path_segment(slug)}">'
-                f'<span aria-hidden="true">🎤</span>{esc(name)}</a>'
+                f'{icon("mic")}{esc(name)}</a>'
             )
         artists = " ".join(artist_links)
     summary = esc((row["notes"] or "")[:120])
+    summary_html = f'<p class="card-summary">{summary}</p>' if summary else ""
+    artists_html = f'<p class="artist-links">{artists}</p>' if artists else ""
     title = esc(row["title"] or "(untitled)")
+    event_date = datetime.strptime(row["event_date"], "%Y-%m-%d")
+    weekday = ("月", "火", "水", "木", "金", "土", "日")[event_date.weekday()]
     return f"""
 <article class="card">
-  <div class="card-head">
-    <div>
+  <time class="card-date" datetime="{esc(row['event_date'])}" aria-label="{event_date.year}年{event_date.month}月{event_date.day}日 {weekday}曜日">
+    <span class="date-month">{event_date.year}.{event_date.month:02d}</span>
+    <span class="date-day">{event_date.day:02d}</span>
+    <span class="date-weekday">{weekday}曜日</span>
+  </time>
+  <div class="card-content">
       <h2><a class="typed-link event-link" href="/entries/{row['id']}">{title}</a></h2>
       <p class="card-meta">
-        <span class="typed-link date-item"><span aria-hidden="true">📅</span>{esc(row['event_date'])}</span>
-        <a class="typed-link venue-link" href="/venues/{url_path_segment(row['venue_slug'])}"><span aria-hidden="true">📍</span>{esc(row['venue_name'])}</a>
+        <a class="typed-link venue-link" href="/venues/{url_path_segment(row['venue_slug'])}">{icon('pin')}{esc(row['venue_name'])}</a>
       </p>
-    </div>
+      {artists_html}
+      {summary_html}
   </div>
-  <p class="artist-links">{artists}</p>
-  <p class="muted">{summary}</p>
+  <a class="card-open" href="/entries/{row['id']}" aria-label="{title}の詳細">{icon('arrow')}</a>
 </article>"""
 
 
@@ -788,7 +823,7 @@ def render_entry_form(values, action, submit_label, environ, errors=None):
     error_block = ""
     if errors:
         items = "".join(f"<li>{esc(error)}</li>" for error in errors)
-        error_block = f'<div class="flash error"><ul>{items}</ul></div>'
+        error_block = f'<div class="flash error" role="alert"><ul>{items}</ul></div>'
 
     artist_rows = []
     max_artist_rows = max(len(artist_inputs), len(artist_seen_counts))
@@ -796,8 +831,8 @@ def render_entry_form(values, action, submit_label, environ, errors=None):
         artist_rows.append(
             f"""
             <div class="artist-row">
-              <input name="artists" value="{esc(artist_inputs[idx] if idx < len(artist_inputs) else '')}" placeholder="演者名">
-              <input name="artist_seen_counts" value="{esc(artist_seen_counts[idx] if idx < len(artist_seen_counts) else '')}" placeholder="何回目か(任意)" inputmode="numeric">
+              <input name="artists" value="{esc(artist_inputs[idx] if idx < len(artist_inputs) else '')}" placeholder="演者名" aria-label="演者名">
+              <input name="artist_seen_counts" value="{esc(artist_seen_counts[idx] if idx < len(artist_seen_counts) else '')}" placeholder="何回目か(任意)" aria-label="何回目か(任意)" inputmode="numeric">
             </div>
             """
         )
@@ -809,9 +844,9 @@ def render_entry_form(values, action, submit_label, environ, errors=None):
         purchase_rows.append(
             f"""
             <div class="purchase-row">
-              <input name="purchase_names" value="{esc(purchase_names[idx] if idx < len(purchase_names) else '')}" placeholder="購入物名">
-              <input name="purchase_urls" value="{esc(purchase_urls[idx] if idx < len(purchase_urls) else '')}" placeholder="URL">
-              <input name="purchase_notes" value="{esc(purchase_notes[idx] if idx < len(purchase_notes) else '')}" placeholder="メモ">
+              <input name="purchase_names" value="{esc(purchase_names[idx] if idx < len(purchase_names) else '')}" placeholder="購入物名" aria-label="購入物名">
+              <input name="purchase_urls" value="{esc(purchase_urls[idx] if idx < len(purchase_urls) else '')}" placeholder="URL" aria-label="URL">
+              <input name="purchase_notes" value="{esc(purchase_notes[idx] if idx < len(purchase_notes) else '')}" placeholder="メモ" aria-label="メモ">
             </div>
             """
         )
@@ -825,9 +860,9 @@ def render_entry_form(values, action, submit_label, environ, errors=None):
         link_rows.append(
             f"""
             <div class="link-row"{candidate_data_attr}>
-              <input name="link_labels" value="{esc(link_labels[idx] if idx < len(link_labels) else '')}" placeholder="ラベル">
-              <input name="link_titles" value="{esc(link_titles[idx] if idx < len(link_titles) else '')}" placeholder="タイトル（任意）">
-              <input type="url" name="link_urls" value="{esc(link_urls[idx] if idx < len(link_urls) else '')}" placeholder="URL">
+              <input name="link_labels" value="{esc(link_labels[idx] if idx < len(link_labels) else '')}" placeholder="ラベル" aria-label="ラベル">
+              <input name="link_titles" value="{esc(link_titles[idx] if idx < len(link_titles) else '')}" placeholder="タイトル（任意）" aria-label="タイトル（任意）">
+              <input type="url" name="link_urls" value="{esc(link_urls[idx] if idx < len(link_urls) else '')}" placeholder="URL" aria-label="URL">
               <input type="hidden" name="link_candidate_ids" value="{esc(link_candidate_ids[idx] if idx < len(link_candidate_ids) else '')}">
             </div>
             """
@@ -838,22 +873,26 @@ def render_entry_form(values, action, submit_label, environ, errors=None):
     {error_block}
     <form method="post" action="{esc(action)}" class="entry-form">
       {csrf_input(environ)}
-      <label>開催日
-        <input type="date" name="event_date" value="{esc(values.get('event_date', ''))}" required>
-      </label>
-      <label>イベント名
-        <input type="text" name="title" value="{esc(values.get('title', ''))}">
-      </label>
-      <label>会場
-        <input type="text" name="venue" value="{esc(values.get('venue', ''))}" required list="venues">
-      </label>
+      <div class="form-basics">
+        <label>開催日
+          <input type="date" name="event_date" value="{esc(values.get('event_date', ''))}" required>
+        </label>
+        <label>イベント名
+          <input type="text" name="title" value="{esc(values.get('title', ''))}">
+        </label>
+        <label>会場
+          <input type="text" name="venue" value="{esc(values.get('venue', ''))}" required list="venues">
+        </label>
+      </div>
       <fieldset>
         <legend>関連リンク</legend>
         <div id="link-fields">
           {link_block}
         </div>
-        <button type="button" class="secondary-button" data-add-link>関連リンクを追加</button>
-        <button type="button" class="secondary-button" data-load-link-candidates>候補を読み込む</button>
+        <div class="field-actions">
+          <button type="button" class="secondary-button" data-add-link>{icon('plus')}関連リンクを追加</button>
+          <button type="button" class="secondary-button" data-load-link-candidates>{icon('search')}候補を読み込む</button>
+        </div>
         <div id="link-candidates" class="link-candidates" aria-live="polite"></div>
         <p class="hint">ブログは「イベント名@会場名」、Flickr は「yyyy/MM/dd イベント名@会場名」と一致する候補を優先します。</p>
       </fieldset>
@@ -862,7 +901,7 @@ def render_entry_form(values, action, submit_label, environ, errors=None):
         <div id="artist-fields">
           {artist_fields}
         </div>
-        <button type="button" class="secondary-button" data-add-artist>演者を追加</button>
+        <button type="button" class="secondary-button" data-add-artist>{icon('plus')}演者を追加</button>
         <p class="hint">回数を空欄にすると自動計算します。数値を入れるとその回を基準に以後の回数もつながります。</p>
       </fieldset>
       <fieldset>
@@ -870,32 +909,35 @@ def render_entry_form(values, action, submit_label, environ, errors=None):
         <div id="purchase-fields">
           {purchase_block}
         </div>
-        <button type="button" class="secondary-button" data-add-purchase>購入物を追加</button>
+        <button type="button" class="secondary-button" data-add-purchase>{icon('plus')}購入物を追加</button>
         <p class="hint">URL がなくても記録できます。</p>
       </fieldset>
       <label>メモ
         <textarea name="notes" rows="10">{esc(values.get('notes', ''))}</textarea>
       </label>
-      <button type="submit">{esc(submit_label)}</button>
+      <div class="form-actions">
+        <button type="submit">{esc(submit_label)}</button>
+        <a class="button-link secondary-button" href="{esc(action) if action != '/entries' else '/'}">キャンセル</a>
+      </div>
     </form>
     <template id="artist-row-template">
       <div class="artist-row">
-        <input name="artists" value="" placeholder="演者名">
-        <input name="artist_seen_counts" value="" placeholder="何回目か(任意)" inputmode="numeric">
+        <input name="artists" value="" placeholder="演者名" aria-label="演者名">
+        <input name="artist_seen_counts" value="" placeholder="何回目か(任意)" aria-label="何回目か(任意)" inputmode="numeric">
       </div>
     </template>
     <template id="purchase-row-template">
       <div class="purchase-row">
-        <input name="purchase_names" value="" placeholder="購入物名">
-        <input name="purchase_urls" value="" placeholder="URL">
-        <input name="purchase_notes" value="" placeholder="メモ">
+        <input name="purchase_names" value="" placeholder="購入物名" aria-label="購入物名">
+        <input name="purchase_urls" value="" placeholder="URL" aria-label="URL">
+        <input name="purchase_notes" value="" placeholder="メモ" aria-label="メモ">
       </div>
     </template>
     <template id="link-row-template">
       <div class="link-row">
-        <input name="link_labels" value="" placeholder="ラベル">
-        <input name="link_titles" value="" placeholder="タイトル（任意）">
-        <input type="url" name="link_urls" value="" placeholder="URL">
+        <input name="link_labels" value="" placeholder="ラベル" aria-label="ラベル">
+        <input name="link_titles" value="" placeholder="タイトル（任意）" aria-label="タイトル（任意）">
+        <input type="url" name="link_urls" value="" placeholder="URL" aria-label="URL">
         <input type="hidden" name="link_candidate_ids" value="">
       </div>
     </template>
@@ -1273,26 +1315,42 @@ def page_home(environ, start_response):
     entries = list_entries(conn, params, ENTRY_PAGE_SIZE, offset)
     artists = conn.execute("SELECT name FROM artists ORDER BY name").fetchall()
     venues = conn.execute("SELECT name FROM venues ORDER BY name").fetchall()
-    cards = "".join(render_entry_card(row) for row in entries) or '<p class="muted">まだ記録がありません。</p>'
+    filtered = any(first(params, key).strip() for key in ("q", "artist", "venue", "from", "to"))
+    empty_title = "条件に合う記録がありません" if filtered else "最初のライブを記録しましょう"
+    empty_description = "キーワードや日付を変えて、もう一度検索してみてください。" if filtered else "演者、会場、その日の余韻。大切な記憶をここに残せます。"
+    empty_action = '<a class="button-link secondary-button" href="/">絞り込みを解除</a>' if filtered else (
+        f'<a class="button-link" href="/entries/new">{icon("plus")}記録を追加</a>' if is_authenticated(environ) else ""
+    )
+    cards = "".join(render_entry_card(row) for row in entries) or f'''
+        <div class="empty-state"><span class="empty-icon">{icon('journal')}</span>
+          <h2>{empty_title}</h2><p class="muted">{empty_description}</p>{empty_action}
+        </div>'''
     pagination = render_pagination(params, page, total_count, ENTRY_PAGE_SIZE)
     artist_options = "".join(f'<option value="{esc(row["name"])}">' for row in artists)
     venue_options = "".join(f'<option value="{esc(row["name"])}">' for row in venues)
     body = f"""
     <section class="hero">
+      <p class="eyebrow">YOUR LIVE ARCHIVE</p>
       <h1>ライブ記録</h1>
-      <p class="muted">見たライブを残して、演者ごとの履歴をたどれます。</p>
+      <p class="muted">音楽と出会った日を残して、いつでも振り返る。</p>
     </section>
-    <form method="get" action="/" class="filters">
-      <input type="search" name="q" placeholder="キーワード" value="{esc(first(params, 'q'))}">
-      <input type="text" name="artist" placeholder="演者名" value="{esc(first(params, 'artist'))}" list="artists">
-      <input type="text" name="venue" placeholder="会場名" value="{esc(first(params, 'venue'))}" list="venues">
-      <input type="date" name="from" value="{esc(first(params, 'from'))}">
-      <input type="date" name="to" value="{esc(first(params, 'to'))}">
-      <button type="submit">検索</button>
+    <form method="get" action="/" class="filters" role="search" aria-label="ライブ記録を検索">
+      <label class="filter-keyword">キーワード
+        <span class="search-input">{icon('search')}<input type="search" name="q" placeholder="イベント名、メモなど" value="{esc(first(params, 'q'))}"></span>
+      </label>
+      <label>演者<input type="text" name="artist" placeholder="すべての演者" value="{esc(first(params, 'artist'))}" list="artists"></label>
+      <label>会場<input type="text" name="venue" placeholder="すべての会場" value="{esc(first(params, 'venue'))}" list="venues"></label>
+      <label>開始日<input type="date" name="from" value="{esc(first(params, 'from'))}"></label>
+      <label>終了日<input type="date" name="to" value="{esc(first(params, 'to'))}"></label>
+      <button type="submit">{icon('search')}検索</button>
     </form>
     <datalist id="artists">{artist_options}</datalist>
     <datalist id="venues">{venue_options}</datalist>
-    <section class="cards">{cards}</section>
+    <div class="results-heading">
+      <h2 id="entries-heading">{'検索結果' if filtered else 'すべての記録'} <span class="result-count">{total_count:,}<span>件</span></span></h2>
+      {'<a href="/" class="clear-filters">絞り込みを解除</a>' if filtered else '<span class="muted">新しい順</span>'}
+    </div>
+    <section class="cards" aria-labelledby="entries-heading">{cards}</section>
     {pagination}
     """
     conn.close()
@@ -1301,27 +1359,31 @@ def page_home(environ, start_response):
 
 def page_login(environ, start_response, error=""):
     password_notice = ""
+    error_block = f'<div class="flash error" role="alert">{esc(error)}</div>' if error else ""
     disabled = ""
     if not ADMIN_PASSWORD:
         password_notice = '<p class="flash error">LIVE_JOURNAL_PASSWORD が未設定のためログインできません。</p>'
         disabled = " disabled"
     body = f"""
-    <section class="single-column">
-      <h1>Login</h1>
-      <p class="muted">更新操作にはログインが必要です。</p>
+    <section class="single-column login-panel">
+      <span class="login-mark">{icon('journal')}</span>
+      <p class="eyebrow">WELCOME BACK</p>
+      <h1>ログイン</h1>
+      <p class="muted">ライブの記憶を、少しずつ。</p>
       {password_notice}
+      {error_block}
       <form method="post" action="/login" class="entry-form compact">
-        <label>ID
-          <input type="text" name="username" value="{esc(ADMIN_USER)}">
+        <label>ユーザー名
+          <input type="text" name="username" value="{esc(ADMIN_USER)}" autocomplete="username" required>
         </label>
-        <label>Password
-          <input type="password" name="password">
+        <label>パスワード
+          <input type="password" name="password" autocomplete="current-password" required>
         </label>
-        <button type="submit"{disabled}>Login</button>
+        <button type="submit"{disabled}>ログイン{icon('arrow')}</button>
       </form>
     </section>
     """
-    return response_html(start_response, layout("Login", body, environ, error))
+    return response_html(start_response, layout("Login", body, environ))
 
 
 def handle_login(environ, start_response):
@@ -1447,7 +1509,7 @@ def page_link_settings(environ, start_response, values=None, errors=None):
     errors = errors or []
     error_block = ""
     if errors:
-        error_block = '<div class="flash error"><ul>' + "".join(f"<li>{esc(error)}</li>" for error in errors) + "</ul></div>"
+        error_block = '<div class="flash error" role="alert"><ul>' + "".join(f"<li>{esc(error)}</li>" for error in errors) + "</ul></div>"
     source_blocks = []
     for source in sources:
         source_values = dict(source)
@@ -1478,6 +1540,7 @@ def page_link_settings(environ, start_response, values=None, errors=None):
     message = first(query, "message")
     body = f"""
     <section class="single-column">
+      <p class="eyebrow">LINK SOURCES</p>
       <h1>リンク元設定</h1>
       <p class="muted">ブログや Flickr を登録してから「今すぐ更新」すると、エントリー作成時に候補を選べます。</p>
       {error_block}
@@ -1655,6 +1718,8 @@ def page_new_entry(environ, start_response, values=None, errors=None):
     venue_options = "".join(f'<option value="{esc(row["name"])}">' for row in venues)
     body = f"""
     <section class="single-column">
+      <a class="back-link" href="/">{icon('arrow')}記録一覧に戻る</a>
+      <p class="eyebrow">NEW ENTRY</p>
       <h1>新規記録</h1>
       <datalist id="venues">{venue_options}</datalist>
       {render_entry_form(values, "/entries", "保存", environ, errors)}
@@ -1691,7 +1756,7 @@ def page_entry_detail(environ, start_response, entry_id):
     artists = "".join(
         f"""
         <li>
-          <a class="typed-link artist-link" href="/artists/{url_path_segment(row['slug'])}"><span aria-hidden="true">🎤</span>{esc(row['name'])}</a>
+          <a class="typed-link artist-link" href="/artists/{url_path_segment(row['slug'])}">{icon('mic')}{esc(row['name'])}</a>
           <span class="pill">{row['seen_count']}回目</span>
           {'<a href="' + esc(safe_external_url(row['lastfm_url'])) + '" target="_blank" rel="noreferrer">Last.fm</a>' if safe_external_url(row['lastfm_url']) else ''}
         </li>
@@ -1719,11 +1784,12 @@ def page_entry_detail(environ, start_response, entry_id):
         </div>
         """
     body = f"""
-    <article class="single-column">
+    <article class="single-column entry-detail">
+      <a class="back-link" href="/">{icon('arrow')}記録一覧に戻る</a>
       <h1>{esc(entry['title'] or '(untitled)')}</h1>
       <p class="meta-line">
-        <span class="typed-link date-item"><span aria-hidden="true">📅</span>{esc(entry['event_date'])}</span>
-        <a class="typed-link venue-link" href="/venues/{url_path_segment(entry['venue_slug'])}"><span aria-hidden="true">📍</span>{esc(entry['venue_name'])}</a>
+        <span class="typed-link date-item">{icon('calendar')}{esc(entry['event_date'])}</span>
+        <a class="typed-link venue-link" href="/venues/{url_path_segment(entry['venue_slug'])}">{icon('pin')}{esc(entry['venue_name'])}</a>
       </p>
       {actions}
       <section>
@@ -1758,6 +1824,8 @@ def page_edit_entry(environ, start_response, entry_id, values=None, errors=None)
         return response_not_found(start_response)
     body = f"""
     <section class="single-column">
+      <a class="back-link" href="/">{icon('arrow')}記録一覧に戻る</a>
+      <p class="eyebrow">EDIT ENTRY</p>
       <h1>記録を編集</h1>
       {render_entry_form(entry_values, f"/entries/{entry_id}", "更新", environ, errors)}
     </section>
@@ -1828,9 +1896,9 @@ def page_artist(environ, start_response, artist_ref):
     items = "".join(
         f"""
         <li class="timeline-item">
-          <span class="typed-link date-item"><span aria-hidden="true">📅</span>{esc(row['event_date'])}</span>
+          <span class="typed-link date-item">{icon('calendar')}{esc(row['event_date'])}</span>
           <a class="typed-link event-link" href="/entries/{row['id']}">{esc(row['title'] or '(untitled)')}</a>
-          <a class="typed-link venue-link" href="/venues/{url_path_segment(row['venue_slug'])}"><span aria-hidden="true">📍</span>{esc(row['venue_name'])}</a>
+          <a class="typed-link venue-link" href="/venues/{url_path_segment(row['venue_slug'])}">{icon('pin')}{esc(row['venue_name'])}</a>
           <span class="pill">{row['seen_count']}回目</span>
         </li>
         """
@@ -1838,6 +1906,8 @@ def page_artist(environ, start_response, artist_ref):
     ) or "<li>記録なし</li>"
     body = f"""
     <section class="single-column">
+      <a class="back-link" href="/">{icon('arrow')}記録一覧に戻る</a>
+      <p class="eyebrow">ARTIST HISTORY</p>
       <h1>{esc(artist['name'])}</h1>
       <p class="muted">観覧回数 {len(rows)} 回</p>
       <ul class="timeline-list">{items}</ul>
@@ -1873,15 +1943,17 @@ def page_venue(environ, start_response, venue_ref):
     items = "".join(
         f"""
         <li class="timeline-item">
-          <span class="typed-link date-item"><span aria-hidden="true">📅</span>{esc(row['event_date'])}</span>
+          <span class="typed-link date-item">{icon('calendar')}{esc(row['event_date'])}</span>
           <a class="typed-link event-link" href="/entries/{row['id']}">{esc(row['title'] or '(untitled)')}</a>
-          <span class="typed-link"><span aria-hidden="true">🎤</span>{esc(row['artists'] or '')}</span>
+          <span class="typed-link">{icon('mic')}{esc(row['artists'] or '')}</span>
         </li>
         """
         for row in rows
     ) or "<li>記録なし</li>"
     body = f"""
     <section class="single-column">
+      <a class="back-link" href="/">{icon('arrow')}記録一覧に戻る</a>
+      <p class="eyebrow">VENUE HISTORY</p>
       <h1>{esc(venue['name'])}</h1>
       <p class="muted">開催記録 {len(rows)} 件</p>
       <ul class="timeline-list">{items}</ul>
