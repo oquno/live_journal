@@ -1321,8 +1321,8 @@ a.artist-link:hover {
 }
 
 .stats-ranking {
-  list-style: none;
-  padding: 0;
+  list-style: decimal-leading-zero;
+  padding-left: 2rem;
   margin: 20px 0 0;
 }
 
@@ -1339,7 +1339,7 @@ a.artist-link:hover {
   text-decoration: underline;
 }
 
-.ranking-number {
+.stats-ranking li::marker {
   color: #81928a;
   font-size: .72rem;
   font-variant-numeric: tabular-nums;

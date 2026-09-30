@@ -1415,10 +1415,9 @@ def render_stats_chart(rows, label, links=None):
 def render_stats_ranking(rows, period, kind):
     maximum = max((row["count"] for row in rows), default=1)
     items = []
-    for index, row in enumerate(rows[:10], 1):
+    for row in rows[:10]:
         href = stats_entries_url(period, **{kind: row["name"]})
         items.append(f'''<li><a href="{esc(href)}" class="ranking-row">
-          <span class="ranking-number">{index:02d}</span>
           <span class="ranking-main"><span class="ranking-name">{esc(row['name'])}</span>
             <span class="ranking-track" aria-hidden="true"><span style="width:{row['count'] / maximum * 100:.2f}%"></span></span>
           </span><span class="ranking-count">{row['count']:,}<small>{'回' if kind == 'artist' else '件'}</small></span>
