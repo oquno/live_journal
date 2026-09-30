@@ -9,6 +9,7 @@ import secrets
 import socket
 import sqlite3
 import unicodedata
+from calendar import monthrange
 from datetime import datetime, timezone
 from http import cookies
 from email.utils import parsedate_to_datetime
@@ -17,6 +18,8 @@ from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 from wsgiref.simple_server import make_server
 import xml.etree.ElementTree as ET
+
+from stats import load_stats, stats_period
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -654,6 +657,7 @@ def icon(name):
         "search": '<circle cx="10.5" cy="10.5" r="7"/><path d="m16 16 5 5"/>',
         "plus": '<path d="M12 5v14M5 12h14"/>',
         "arrow": '<path d="M5 12h14m-6-6 6 6-6 6"/>',
+        "chart": '<path d="M4 3v18h17M8 16v-5m5 5V7m5 9V4"/>',
     }
     return (
         '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
@@ -665,7 +669,7 @@ def icon(name):
 def nav(environ):
     auth = is_authenticated(environ)
     path = environ.get("PATH_INFO", "/")
-    items = [("/", "記録一覧", "")]
+    items = [("/", "記録一覧", ""), ("/stats", f'{icon("chart")}Stats', "")]
     if auth:
         items.extend([
             ("/settings/links", "リンク元", ""),
@@ -1357,6 +1361,182 @@ def page_home(environ, start_response):
     return response_html(start_response, layout("Entries", body, environ))
 
 
+def stats_entries_url(period, **filters):
+    params = {key: period[key] for key in ("from", "to") if period[key]}
+    params.update(filters)
+    return "/?" + urlencode(params) if params else "/"
+
+
+def stats_bucket_period(key, period):
+    if len(key) == 4:
+        start, end = f"{key}-01-01", f"{key}-12-31"
+    else:
+        year, month = map(int, key.split("-"))
+        start, end = f"{key}-01", f"{key}-{monthrange(year, month)[1]:02d}"
+    return stats_period(date_from=max(start, period["from"] or start),
+                        date_to=min(end, period["to"] or end))
+
+
+def stats_period_url(period):
+    start, end = period["from"], period["to"]
+    if start and end and start[4:] == "-01-01" and end == start[:4] + "-12-31":
+        return "/stats?" + urlencode({"year": start[:4]})
+    return "/stats?" + urlencode({key: period[key] for key in ("from", "to") if period[key]})
+
+
+def render_stats_chart(rows, label, links=None):
+    width, height = (max(460, len(rows) * 56 + 56) if links else max(320, len(rows) * 32 + 44)), 224
+    left, top, bottom = 40, 26, 174
+    slot = (width - left - 12) / max(1, len(rows))
+    maximum = max((row["count"] for row in rows), default=0)
+    step = max(1, (maximum + 3) // 4)
+    axis_max = max(step, ((maximum + step - 1) // step) * step)
+    elements = []
+    for count in range(0, axis_max + 1, step):
+        y = bottom - (bottom - top) * count / axis_max
+        elements.append(f'<path class="chart-grid" d="M{left} {y:.1f}H{width - 12}"/>')
+        elements.append(f'<text class="chart-axis" x="{left - 10}" y="{y + 4:.1f}" text-anchor="end">{count}</text>')
+    for index, row in enumerate(rows):
+        x = left + slot * (index + .5)
+        bar_height = (bottom - top) * row["count"] / axis_max
+        caption = f'{row["label"]}: {row["count"]:,}件'
+        bar = f'''<title>{esc(caption)}</title>
+          <rect class="chart-bar{' chart-bar-empty' if not row['count'] else ''}" x="{x - slot * .26:.1f}" y="{bottom - max(2, bar_height):.1f}" width="{slot * .52:.1f}" height="{max(2, bar_height):.1f}" rx="4"/>
+          <text class="chart-value" x="{x:.1f}" y="{bottom - bar_height - 8:.1f}" text-anchor="middle">{row['count']}</text>
+          <text class="chart-axis" x="{x:.1f}" y="{bottom + 24}" text-anchor="middle">{esc(row['label'])}</text>'''
+        elements.append(f'<a href="{esc(links[index])}" aria-label="{esc(caption)}、この期間を集計">{bar}</a>' if links else f'<g>{bar}</g>')
+    table_rows = "".join(f'<tr><th scope="row">{esc(row["label"])}</th><td>{row["count"]:,}件</td></tr>' for row in rows)
+    return f'''<div class="chart-scroll" tabindex="0" role="region" aria-label="{esc(label)}のグラフ（横にスクロールできます）">
+      <svg class="stats-chart" viewBox="0 0 {width} {height}" style="min-width:{width}px" role="{'group' if links else 'img'}" aria-label="{esc(label)}"><title>{esc(label)}</title>{''.join(elements)}</svg>
+    </div><details class="chart-data"><summary>数値を表で見る</summary>
+      <table class="stats-table"><caption>{esc(label)}</caption><thead><tr><th scope="col">期間・曜日</th><th scope="col">ライブ数</th></tr></thead><tbody>{table_rows}</tbody></table></details>'''
+
+
+def render_stats_ranking(rows, period, kind):
+    maximum = max((row["count"] for row in rows), default=1)
+    items = []
+    for index, row in enumerate(rows[:10], 1):
+        href = stats_entries_url(period, **{kind: row["name"]})
+        items.append(f'''<li><a href="{esc(href)}" class="ranking-row">
+          <span class="ranking-number">{index:02d}</span>
+          <span class="ranking-main"><span class="ranking-name">{esc(row['name'])}</span>
+            <span class="ranking-track" aria-hidden="true"><span style="width:{row['count'] / maximum * 100:.2f}%"></span></span>
+          </span><span class="ranking-count">{row['count']:,}<small>{'回' if kind == 'artist' else '件'}</small></span>
+        </a></li>''')
+    return '<ol class="stats-ranking">' + "".join(items) + '</ol>' if items else '<p class="muted">演者の記録がありません。</p>'
+
+
+def render_stats_heatmap(data, period):
+    buckets = data["buckets"]
+    artists = data["artists"][:8]
+    maximum = max((artist[data["grain"]][bucket["key"]] for artist in artists for bucket in buckets), default=1) or 1
+    headings = "".join(f'<th scope="col">{esc(bucket["label"])}</th>' for bucket in buckets)
+    rows = []
+    for artist in artists:
+        cells = []
+        for bucket in buckets:
+            count = artist[data["grain"]][bucket["key"]]
+            level = min(4, max(1, (count * 4 + maximum - 1) // maximum)) if count else 0
+            href = stats_entries_url(stats_bucket_period(bucket["key"], period), artist=artist["name"])
+            caption = f'{artist["name"]} / {bucket["label"]}: {count}回'
+            cells.append(f'<td><a class="heat-cell heat-level-{level}" href="{esc(href)}" title="{esc(caption)}" aria-label="{esc(caption)}">{count if count else "–"}</a></td>')
+        rows.append(f'<tr><th scope="row"><a href="{esc(stats_entries_url(period, artist=artist["name"]))}">{esc(artist["name"])}</a></th>{"".join(cells)}</tr>')
+    return f'''<div class="heatmap-scroll" tabindex="0" role="region" aria-label="アーティストと時期の表（横にスクロールできます）">
+      <table class="stats-heatmap"><caption>よく見た上位8組の{'月別' if data['grain'] == 'months' else '年別'}観覧回数</caption>
+        <thead><tr><th scope="col">アーティスト</th>{headings}</tr></thead><tbody>{''.join(rows)}</tbody></table></div>
+      <div class="heatmap-legend"><span>少ない</span>{''.join(f'<span class="heat-cell heat-level-{level}" aria-hidden="true"></span>' for level in range(5))}<span>多い</span></div>'''
+
+
+def page_stats(environ, start_response):
+    if not can_view(environ):
+        return redirect(start_response, "/login")
+    params = parse_query(environ)
+    try:
+        period = stats_period(first(params, "year"), first(params, "from"), first(params, "to"))
+    except ValueError as error:
+        body = f'''<section class="single-column"><h1>集計期間を確認してください</h1>
+          <p>{esc(str(error))}</p><a class="button-link secondary-button" href="/stats">Stats に戻る</a></section>'''
+        return response_html(start_response, layout("Stats", body, environ), "400 Bad Request")
+    conn = get_db()
+    try:
+        data = load_stats(conn, period)
+    finally:
+        conn.close()
+    years = sorted(set(data["years"] + ([period["year"]] if period["year"] else [])), reverse=True)
+    year_options = '<option value="">全期間</option>' + "".join(
+        f'<option value="{esc(year)}"{" selected" if year == period["year"] else ""}>{esc(year)}年</option>' for year in years
+    )
+    custom = not period["year"]
+    body = f'''<section class="hero stats-hero"><p class="eyebrow">YOUR LIVE IN NUMBERS</p>
+      <h1>Stats <span>ライブの足跡</span></h1><p class="muted">よく見た演者、通った会場、夢中になった時期。数字から記憶をたどる。</p></section>
+    <section class="stats-filters" aria-label="集計期間を選ぶ">
+      <form method="get" action="/stats" class="stats-year-form">
+        <label for="stats-year">年で振り返る</label><div><select id="stats-year" name="year">{year_options}</select><button type="submit">表示</button></div>
+      </form><span class="stats-filter-divider">または</span>
+      <form method="get" action="/stats" class="stats-range-form">
+        <label>開始日<input type="date" name="from" value="{esc(period['from'] if custom else '')}"></label>
+        <label>終了日<input type="date" name="to" value="{esc(period['to'] if custom else '')}"></label>
+        <button type="submit" class="secondary-button">この期間を集計</button>
+      </form>
+    </section>
+    <div class="results-heading"><h2>{esc(period['label'])}</h2>
+      <div class="stats-period-actions"><a href="{esc(stats_entries_url(period))}">この期間の記録を見る{icon('arrow')}</a>{'<a href="/stats">全期間に戻す</a>' if period['from'] or period['to'] else ''}</div>
+    </div>'''
+    if not data["entries"]:
+        action = '<a class="button-link secondary-button" href="/stats">全期間を見る</a>' if data["years"] else (
+            f'<a class="button-link" href="/entries/new">{icon("plus")}記録を追加</a>' if is_authenticated(environ) else ""
+        )
+        body += f'''<div class="empty-state"><span class="empty-icon">{icon('chart')}</span>
+          <h2>{'この期間の記録がありません' if data['years'] else 'ライブの記録から、足跡が見えてきます'}</h2>
+          <p class="muted">{'年や日付を変えて振り返ってみてください。' if data['years'] else '記録を追加すると、演者や会場のランキング、時期ごとのグラフが表示されます。'}</p>{action}</div>'''
+        return response_html(start_response, layout("Stats", body, environ))
+    metrics = [
+        ("ライブ記録", data["entries"], "件", f'{data["first_date"]} 〜 {data["last_date"]}'),
+        ("見たアーティスト", len(data["artists"]), "組", f'延べ {data["appearances"]:,} 回の観覧'),
+        ("訪れた会場", len(data["venues"]), "か所", "この期間に訪れた会場の種類"),
+        ("ライブに行った日", data["days"], "日", f'1記録あたり平均 {data["appearances"] / data["entries"]:.1f} 組'),
+    ]
+    metric_html = "".join(f'''<div class="stats-metric"><p>{label}</p><div>{count:,}<span>{unit}</span></div><small>{esc(hint)}</small></div>''' for label, count, unit, hint in metrics)
+    links = [stats_period_url(stats_bucket_period(bucket["key"], period)) for bucket in data["buckets"]]
+    artist_total = len(data["artists"])
+    new_percent = data["new_artists"] / artist_total * 100 if artist_total else 0
+    top_artist = data["artists"][0] if artist_total else None
+    top_artist_html = f'''<a href="{esc(stats_entries_url(period, artist=top_artist['name']))}">{esc(top_artist['name'])}</a><span>{top_artist['count']:,}回</span>''' if top_artist else '演者の記録がありません'
+    annual_rows = []
+    for year_data in data["annual"]:
+        year_period = stats_bucket_period(year_data["year"], period)
+        top = "".join(f'''<a class="annual-artist" href="{esc(stats_entries_url(year_period, artist=artist['name']))}">{esc(artist['name'])}<span>{artist['count']}回</span></a>''' for artist in year_data["top"])
+        annual_rows.append(f'''<tr><th scope="row"><a href="{esc(stats_period_url(year_period))}">{year_data['year']}年</a></th><td>{year_data['count']:,}件</td><td>{year_data['artist_count']:,}組</td><td><div class="annual-artists">{top or '–'}</div></td></tr>''')
+    body += f'''<section class="stats-metrics" aria-label="期間の集計">{metric_html}</section>
+    <div class="stats-grid">
+      <section class="stats-panel stats-full"><div class="stats-panel-heading"><div><p class="eyebrow">LIVE FREQUENCY</p><h2>ライブ数の推移</h2></div><span class="stats-badge">{'月ごと' if data['grain'] == 'months' else '年ごと'}</span></div>
+        <p class="hint">棒を選ぶと、その期間を詳しく集計できます。</p>
+        {render_stats_chart(data['buckets'], 'ライブ数の推移', links)}</section>
+      <section class="stats-panel"><div class="stats-panel-heading"><div><p class="eyebrow">FAVORITE ARTISTS</p><h2>よく見たアーティスト</h2></div><span class="stats-badge">上位10組</span></div>
+        <p class="hint">名前を選ぶと、この期間の出演記録へ。</p>{render_stats_ranking(data['artists'], period, 'artist')}</section>
+      <section class="stats-panel"><div class="stats-panel-heading"><div><p class="eyebrow">FAMILIAR PLACES</p><h2>よく行った会場</h2></div><span class="stats-badge">上位10か所</span></div>
+        <p class="hint">会場を選ぶと、この期間のライブ記録へ。</p>{render_stats_ranking(data['venues'], period, 'venue')}</section>
+      <section class="stats-panel stats-full"><div class="stats-panel-heading"><div><p class="eyebrow">ARTISTS OVER TIME</p><h2>この時期、誰を見ていた？</h2></div><span class="stats-badge">上位8組</span></div>
+        <p class="hint">色が濃いほど観覧回数が多い時期。各マスから、その演者の記録をたどれます。</p>{render_stats_heatmap(data, period)}</section>
+      <section class="stats-panel"><p class="eyebrow">SEASONAL RHYTHM</p><h2>何月によく行く？</h2>
+        <p class="hint">選択した期間のライブ数を、1月〜12月ごとに合計。</p>{render_stats_chart(data['seasons'], '月ごとのライブ数')}</section>
+      <section class="stats-panel"><p class="eyebrow">WEEKLY RHYTHM</p><h2>何曜日によく行く？</h2>
+        <p class="hint">ライブの開催曜日ごとに集計。</p>{render_stats_chart(data['weekdays'], '曜日ごとのライブ数')}</section>
+      <section class="stats-panel"><p class="eyebrow">NEW ENCOUNTERS</p><h2>初めての出会いと再会</h2>
+        <div class="stats-discovery"><div class="stats-donut" style="--new-share:{new_percent:.2f}%" role="img" aria-label="初めて見た演者 {data['new_artists']}組、以前にも見た演者 {data['known_artists']}組"><div><strong>{artist_total:,}</strong><span>アーティスト</span></div></div>
+          <dl class="stats-legend"><div><dt><i class="legend-new" aria-hidden="true"></i>初めて見た演者</dt><dd>{data['new_artists']:,}<small>組</small></dd></div><div><dt><i class="legend-known" aria-hidden="true"></i>以前にも見た演者</dt><dd>{data['known_artists']:,}<small>組</small></dd></div></dl></div>
+        <p class="hint">初めて見たかどうかは、全記録で最初の観覧日がこの期間内かで判定します。</p></section>
+      <section class="stats-panel stats-highlights"><p class="eyebrow">A CLOSER LOOK</p><h2>この期間のハイライト</h2>
+        <dl><div><dt>いちばん見たアーティスト</dt><dd>{top_artist_html}</dd></div>
+          <div><dt>2回以上見たアーティスト</dt><dd><strong>{data['repeat_artists']:,}</strong><span>組 / {artist_total:,}組</span></dd></div>
+          <div><dt>ライブがいちばん多かった月</dt><dd><a href="{esc(stats_period_url(stats_bucket_period(data['peak_month']['key'], period)))}">{esc(data['peak_month']['key'])}</a><span>{data['peak_month']['count']:,}件</span></dd></div></dl></section>
+      <section class="stats-panel stats-full"><p class="eyebrow">YEAR BY YEAR</p><h2>年ごとの振り返り</h2><p class="hint">選択した期間内の記録から、各年の上位3組を表示。年を選ぶと、その年の集計へ。</p>
+        <div class="stats-table-scroll" tabindex="0" role="region" aria-label="年ごとの集計表（横にスクロールできます）"><table class="stats-table annual-table"><caption>年ごとのライブ数とよく見た演者</caption>
+          <thead><tr><th scope="col">年</th><th scope="col">ライブ数</th><th scope="col">演者数</th><th scope="col">よく見たアーティスト</th></tr></thead><tbody>{''.join(annual_rows)}</tbody></table></div></section>
+    </div><p class="stats-footnote">集計は保存された記録が対象です。ライブ数は1記録につき1件、演者の観覧回数は1記録・1演者につき1回。同日の複数記録も個別に数え、手動指定の通算回数は集計に加算しません。</p>'''
+    return response_html(start_response, layout("Stats", body, environ))
+
+
 def page_login(environ, start_response, error=""):
     password_notice = ""
     error_block = f'<div class="flash error" role="alert">{esc(error)}</div>' if error else ""
@@ -1990,6 +2170,8 @@ def application(environ, start_response):
         return handle_logout(environ, start_response)
     if path == "/" and method == "GET":
         return page_home(environ, start_response)
+    if path == "/stats" and method == "GET":
+        return page_stats(environ, start_response)
     if path == "/entries/new" and method == "GET":
         return page_new_entry(environ, start_response)
     if path == "/entries" and method == "POST":
