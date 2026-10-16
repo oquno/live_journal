@@ -27,6 +27,8 @@ DB_PATH = os.environ.get("LIVE_JOURNAL_DB", os.path.join(BASE_DIR, "data", "live
 HOST = os.environ.get("LIVE_JOURNAL_HOST", "127.0.0.1")
 PORT = int(os.environ.get("LIVE_JOURNAL_PORT", "8000"))
 APP_TITLE = os.environ.get("LIVE_JOURNAL_TITLE", "Live Journal")
+PUBLIC_URL = os.environ.get("LIVE_JOURNAL_PUBLIC_URL", "").strip().rstrip("/")
+APP_DESCRIPTION = "音楽と出会った日を残して、いつでも振り返る。演者・会場・日付からたどるライブの記録。"
 APP_MODE = os.environ.get("LIVE_JOURNAL_MODE", "private")
 ADMIN_USER = os.environ.get("LIVE_JOURNAL_USER", "admin")
 ADMIN_PASSWORD = os.environ.get("LIVE_JOURNAL_PASSWORD")
@@ -695,7 +697,63 @@ def flash_html(message):
     return f'<div class="flash" role="status">{esc(message)}</div>'
 
 
-def layout(title, content, environ=None, flash_message=""):
+def public_base_url(environ):
+    if PUBLIC_URL:
+        base_url = PUBLIC_URL
+    else:
+        scheme = "https" if is_secure_request(environ) else "http"
+        host = environ.get("HTTP_HOST")
+        if not host:
+            host = environ.get("SERVER_NAME", "localhost")
+            port = environ.get("SERVER_PORT", "")
+            if port and port != ("443" if scheme == "https" else "80"):
+                host += ":" + port
+        base_url = f"{scheme}://{host}"
+    try:
+        parsed = urlparse(base_url)
+        port = parsed.port
+    except ValueError:
+        return ""
+    if (parsed.scheme not in ("http", "https") or not parsed.hostname
+            or parsed.username is not None or parsed.password is not None
+            or parsed.path or parsed.params or parsed.query or parsed.fragment
+            or any(char.isspace() or ord(char) < 32 for char in base_url)):
+        return ""
+    return base_url
+
+
+def metadata_tags(title, environ, description="", canonical_path=None):
+    # Only explicitly shareable pages in public mode expose record metadata.
+    shareable = APP_MODE == "public" and environ is not None and canonical_path is not None
+    description = " ".join((description if shareable else "").split()) or APP_DESCRIPTION
+    if len(description) > 160:
+        description = description[:159].rstrip() + "…"
+    tags = [f'<meta name="description" content="{esc(description)}">']
+    if not shareable:
+        tags.append('<meta name="robots" content="noindex, nofollow">')
+        return "\n  ".join(tags)
+    page_title = f"{title} - {APP_TITLE}"
+    for name, value in (
+        ("og:type", "website"), ("og:site_name", APP_TITLE), ("og:locale", "ja_JP"),
+        ("og:title", page_title), ("og:description", description),
+    ):
+        tags.append(f'<meta property="{name}" content="{esc(value)}">')
+    base_url = public_base_url(environ)
+    if base_url:
+        canonical_url = base_url + canonical_path
+        tags.extend([
+            f'<link rel="canonical" href="{esc(canonical_url)}">',
+            f'<meta property="og:url" content="{esc(canonical_url)}">',
+        ])
+    for name, value in (
+        ("twitter:card", "summary"), ("twitter:title", page_title),
+        ("twitter:description", description),
+    ):
+        tags.append(f'<meta name="{name}" content="{esc(value)}">')
+    return "\n  ".join(tags)
+
+
+def layout(title, content, environ=None, flash_message="", *, description="", canonical_path=None):
     return f"""<!doctype html>
 <html lang="ja">
 <head>
@@ -703,6 +761,7 @@ def layout(title, content, environ=None, flash_message=""):
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#f6f8f7">
   <title>{esc(title)} - {esc(APP_TITLE)}</title>
+  {metadata_tags(title, environ, description, canonical_path)}
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
@@ -1358,7 +1417,15 @@ def page_home(environ, start_response):
     {pagination}
     """
     conn.close()
-    return response_html(start_response, layout("Entries", body, environ))
+    filters = [f"{label}: {first(params, key).strip()}" for key, label in (
+        ("q", "キーワード"), ("artist", "演者"), ("venue", "会場"),
+        ("from", "開始日"), ("to", "終了日"),
+    ) if first(params, key).strip()]
+    description = f"{' / '.join(filters)}。{total_count:,}件のライブ記録。" if filtered else APP_DESCRIPTION
+    return response_html(start_response, layout(
+        "ライブ記録の検索結果" if filtered else "ライブ記録", body, environ,
+        description=description, canonical_path=query_path(params, page),
+    ))
 
 
 def stats_entries_url(period, **filters):
@@ -1381,7 +1448,8 @@ def stats_period_url(period):
     start, end = period["from"], period["to"]
     if start and end and start[4:] == "-01-01" and end == start[:4] + "-12-31":
         return "/stats?" + urlencode({"year": start[:4]})
-    return "/stats?" + urlencode({key: period[key] for key in ("from", "to") if period[key]})
+    query = urlencode({key: period[key] for key in ("from", "to") if period[key]})
+    return "/stats" + (f"?{query}" if query else "")
 
 
 def render_stats_chart(rows, label, links=None):
@@ -1461,6 +1529,10 @@ def page_stats(environ, start_response):
         data = load_stats(conn, period)
     finally:
         conn.close()
+    description = (f"{period['label']}のライブ記録 {data['entries']:,}件。"
+                   f"見たアーティスト {len(data['artists']):,}組、訪れた会場 {len(data['venues']):,}か所。"
+                   "ライブの足跡を数字で振り返る。")
+    page_title = f"Stats · {period['label']}"
     years = sorted(set(data["years"] + ([period["year"]] if period["year"] else [])), reverse=True)
     year_options = '<option value="">全期間</option>' + "".join(
         f'<option value="{esc(year)}"{" selected" if year == period["year"] else ""}>{esc(year)}年</option>' for year in years
@@ -1488,7 +1560,9 @@ def page_stats(environ, start_response):
         body += f'''<div class="empty-state"><span class="empty-icon">{icon('chart')}</span>
           <h2>{'この期間の記録がありません' if data['years'] else 'ライブの記録から、足跡が見えてきます'}</h2>
           <p class="muted">{'年や日付を変えて振り返ってみてください。' if data['years'] else '記録を追加すると、演者や会場のランキング、時期ごとのグラフが表示されます。'}</p>{action}</div>'''
-        return response_html(start_response, layout("Stats", body, environ))
+        return response_html(start_response, layout(
+            page_title, body, environ, description=description, canonical_path=stats_period_url(period),
+        ))
     metrics = [
         ("ライブ記録", data["entries"], "件", f'{data["first_date"]} 〜 {data["last_date"]}'),
         ("見たアーティスト", len(data["artists"]), "組", f'延べ {data["appearances"]:,} 回の観覧'),
@@ -1533,7 +1607,9 @@ def page_stats(environ, start_response):
         <div class="stats-table-scroll" tabindex="0" role="region" aria-label="年ごとの集計表（横にスクロールできます）"><table class="stats-table annual-table"><caption>年ごとのライブ数とよく見た演者</caption>
           <thead><tr><th scope="col">年</th><th scope="col">ライブ数</th><th scope="col">演者数</th><th scope="col">よく見たアーティスト</th></tr></thead><tbody>{''.join(annual_rows)}</tbody></table></div></section>
     </div><p class="stats-footnote">集計は保存された記録が対象です。ライブ数は1記録につき1件、演者の観覧回数は1記録・1演者につき1回。同日の複数記録も個別に数え、手動指定の通算回数は集計に加算しません。</p>'''
-    return response_html(start_response, layout("Stats", body, environ))
+    return response_html(start_response, layout(
+        page_title, body, environ, description=description, canonical_path=stats_period_url(period),
+    ))
 
 
 def page_login(environ, start_response, error=""):
@@ -1989,8 +2065,15 @@ def page_entry_detail(environ, start_response, entry_id):
       </section>
     </article>
     """
-    return response_html(start_response,
-        layout(f"{esc(entry['event_date'])} {esc(entry['title'] or '(untitled)')} at {esc(entry['venue_name'])}", body, environ))
+    title = entry['title'] or 'ライブ記録'
+    description = f"{entry['event_date']} / {entry['venue_name']}。"
+    if loaded["artists"]:
+        description += "出演: " + " / ".join(row["name"] for row in loaded["artists"]) + "。"
+    description += "ライブを見た記録。"
+    return response_html(start_response, layout(
+        f"{entry['event_date']} {title} at {entry['venue_name']}", body, environ,
+        description=description, canonical_path=f"/entries/{entry['id']}",
+    ))
 
 
 def page_edit_entry(environ, start_response, entry_id, values=None, errors=None):
@@ -2092,7 +2175,11 @@ def page_artist(environ, start_response, artist_ref):
       <ul class="timeline-list">{items}</ul>
     </section>
     """
-    return response_html(start_response, layout(artist["name"], body, environ))
+    return response_html(start_response, layout(
+        artist["name"], body, environ,
+        description=f"{artist['name']}を見たライブの記録。観覧回数 {len(rows):,}回。日付・会場とともに振り返る。",
+        canonical_path=f"/artists/{url_path_segment(artist['slug'])}",
+    ))
 
 
 def page_venue(environ, start_response, venue_ref):
@@ -2138,7 +2225,11 @@ def page_venue(environ, start_response, venue_ref):
       <ul class="timeline-list">{items}</ul>
     </section>
     """
-    return response_html(start_response, layout(venue["name"], body, environ))
+    return response_html(start_response, layout(
+        venue["name"], body, environ,
+        description=f"{venue['name']}で見たライブの記録 {len(rows):,}件。開催日・イベント・演者を振り返る。",
+        canonical_path=f"/venues/{url_path_segment(venue['slug'])}",
+    ))
 
 
 def serve_static(start_response, path):

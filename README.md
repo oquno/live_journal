@@ -72,6 +72,22 @@
 
 複数ユーザーの管理や、記録ごとの公開・非公開の切り替えには対応していません。
 
+### リンク共有（OGP）
+
+`public` モードでは、記録一覧・検索結果・ライブ詳細・演者・会場・Stats に、
+ページごとのタイトル・説明・正規 URL を設定します。X 用の `summary` メタデータも
+出力します。共有画像は使用せず、`og:image`・`twitter:image` は出力しません。
+
+本番では `LIVE_JOURNAL_PUBLIC_URL=https://live.example.com` のように、公開先の
+オリジン（スキームとホスト、必要ならポート。パスは含めない）を指定してください。
+未設定の場合はリクエストのホストと HTTP/HTTPS から URL を組み立てます。
+HTTPS 終端をリバースプロキシで行う場合は、公開 URL を明示するか、プロキシから
+`X-Forwarded-Proto: https` を渡してください。
+
+検索条件・ページ番号・Stats の期間は正規 URL に保持し、それ以外のクエリは除外します。
+ログイン・管理画面・エラーページ、および `private` モードでは OGP を出力せず、
+検索エンジン向けに `noindex, nofollow` を設定します。
+
 ## 基本的な使い方
 
 1. 管理者としてログインする
@@ -106,7 +122,7 @@ gunicorn wsgi:application --bind 127.0.0.1:8000 --workers 2
 
 開発時は標準ライブラリだけで `python app.py` を使えます。本番では `gunicorn` を使う想定です。
 
-統計の集計・期間指定・閲覧権限のテストは `python3 -m unittest discover -s tests -v` で実行できます。
+統計の集計・期間指定・閲覧権限・OGP のテストは `python3 -m unittest discover -s tests -v` で実行できます。
 
 主な環境変数:
 
@@ -114,6 +130,7 @@ gunicorn wsgi:application --bind 127.0.0.1:8000 --workers 2
 - `LIVE_JOURNAL_HOST`: バインド先ホスト
 - `LIVE_JOURNAL_PORT`: ポート
 - `LIVE_JOURNAL_TITLE`: 画面に表示するサイト名
+- `LIVE_JOURNAL_PUBLIC_URL`: OGP・正規 URL に使う公開先のオリジン（例: `https://live.example.com`）
 - `LIVE_JOURNAL_MODE`: `private` または `public`
 - `LIVE_JOURNAL_USER`: 管理者ユーザー名
 - `LIVE_JOURNAL_PASSWORD`: 管理者パスワード
