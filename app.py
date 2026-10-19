@@ -143,6 +143,29 @@ def delete_app_setting(conn, key):
     conn.execute("DELETE FROM app_settings WHERE key = ?", (key,))
 
 
+def artist_external_links(conn, name):
+    links = []
+    lastfm_user = get_app_setting(conn, "lastfm_user").strip()
+    if lastfm_user:
+        links.append(("Last.fm の scrobble 履歴", f"https://www.last.fm/user/{url_path_segment(lastfm_user)}/library/music/{url_path_segment(name)}"))
+    flickr_users = [get_app_setting(conn, "flickr_user").strip()]
+    if not flickr_users[0]:
+        flickr_users = []
+        for source in conn.execute("SELECT account_url, flickr_user_id FROM link_sources WHERE kind = 'flickr' AND enabled = 1 ORDER BY id"):
+            account = urlparse(source["account_url"] or "")
+            parts = account.path.strip("/").split("/")
+            user = (source["flickr_user_id"] or "").strip()
+            if account.hostname in ("flickr.com", "www.flickr.com") and len(parts) >= 2 and parts[0] == "photos":
+                user = unquote(parts[1])
+            if user and user not in flickr_users:
+                flickr_users.append(user)
+    tag = "".join(ch for ch in name.lower() if ch.isalnum())
+    if tag:
+        for user in flickr_users:
+            links.append(("Flickr の写真（アーティスト名タグ）", f"https://www.flickr.com/photos/{url_path_segment(user)}/tags/{url_path_segment(tag)}/"))
+    return links
+
+
 def slugify(text):
     base = "".join(ch.lower() if ch.isalnum() else "-" for ch in text)
     parts = [part for part in base.split("-") if part]
@@ -1760,6 +1783,8 @@ def page_link_settings(environ, start_response, values=None, errors=None):
     conn = get_db()
     sources = conn.execute("SELECT * FROM link_sources ORDER BY kind, name, id").fetchall()
     flickr_key_configured = bool(get_app_setting(conn, "flickr_api_key"))
+    lastfm_user = get_app_setting(conn, "lastfm_user")
+    flickr_user = get_app_setting(conn, "flickr_user")
     conn.close()
     errors = errors or []
     error_block = ""
@@ -1799,6 +1824,21 @@ def page_link_settings(environ, start_response, values=None, errors=None):
       <h1>リンク元設定</h1>
       <p class="muted">ブログや Flickr を登録してから「今すぐ更新」すると、エントリー作成時に候補を選べます。</p>
       {error_block}
+      <section class="source-card">
+        <h2>アーティストページの外部リンク</h2>
+        <p class="hint">自分のアカウントを設定すると、各アーティストの scrobble 履歴と写真タグへのリンクを表示します。</p>
+        <form method="post" action="/settings/artist-links" class="entry-form">
+          {csrf_input(environ)}
+          <label>Last.fm ユーザー名
+            <input name="lastfm_user" value="{esc(lastfm_user)}" placeholder="例: username">
+          </label>
+          <label>Flickr アカウント名またはユーザー ID（NSID）
+            <input name="flickr_user" value="{esc(flickr_user)}" placeholder="例: username または 12345678@N00">
+          </label>
+          <p class="hint">URL ではなくアカウント名を入力してください。Flickr が空欄の場合は、有効な Flickr リンク元のアカウントを使用します。Last.fm が空欄の場合はリンクを表示しません。</p>
+          <button type="submit">外部リンク設定を保存</button>
+        </form>
+      </section>
       {render_flickr_api_key_form(environ, flickr_key_configured)}
       {''.join(source_blocks) or '<p class="muted">リンク元はまだ登録されていません。</p>'}
       <section class="source-card">
@@ -1828,6 +1868,23 @@ def page_link_settings(environ, start_response, values=None, errors=None):
     </script>
     """
     return response_html(start_response, layout("Link Sources", body, environ, message))
+
+
+def handle_update_artist_links(environ, start_response):
+    if not require_auth(environ, start_response):
+        return [b""]
+    params = parse_body(environ)
+    if not verify_csrf(environ, params):
+        return response_forbidden(start_response)
+    values = {key: first(params, key).strip() for key in ("lastfm_user", "flickr_user")}
+    if any(value and (value in (".", "..") or re.search(r"[\s/?#]", value) or ":" in value) for value in values.values()):
+        return response_html(start_response, layout("Link Sources", '<p>アカウント名を入力してください。URL や空白は使用できません。</p><a href="/settings/links">設定に戻る</a>', environ), "400 Bad Request")
+    conn = get_db()
+    for key, value in values.items():
+        set_app_setting(conn, key, value)
+    conn.commit()
+    conn.close()
+    return redirect(start_response, "/settings/links?message=" + quote("アーティストページの外部リンク設定を保存しました。"))
 
 
 def handle_update_flickr_api_key(environ, start_response):
@@ -2154,7 +2211,12 @@ def page_artist(environ, start_response, artist_ref):
     rows = [dict(row) for row in rows]
     for row in rows:
         row["seen_count"] = compute_seen_count(conn, artist["id"], row["id"])
+    external_links = artist_external_links(conn, artist["name"])
     conn.close()
+    links_html = "".join(
+        f'<a href="{esc(url)}" target="_blank" rel="noopener noreferrer">{esc(label)}</a>'
+        for label, url in external_links
+    )
     items = "".join(
         f"""
         <li class="timeline-item">
@@ -2172,6 +2234,7 @@ def page_artist(environ, start_response, artist_ref):
       <p class="eyebrow">ARTIST HISTORY</p>
       <h1>{esc(artist['name'])}</h1>
       <p class="muted">観覧回数 {len(rows)} 回</p>
+      {'<p class="meta-line">' + links_html + '</p>' if links_html else ''}
       <ul class="timeline-list">{items}</ul>
     </section>
     """
@@ -2272,6 +2335,8 @@ def application(environ, start_response):
         return handle_create_link_source(environ, start_response)
     if path == "/settings/flickr-api-key" and method == "POST":
         return handle_update_flickr_api_key(environ, start_response)
+    if path == "/settings/artist-links" and method == "POST":
+        return handle_update_artist_links(environ, start_response)
     if path == "/api/link-candidates" and method == "GET":
         return handle_link_candidate_api(environ, start_response)
 
