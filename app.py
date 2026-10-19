@@ -147,7 +147,7 @@ def artist_external_links(conn, name):
     links = []
     lastfm_user = get_app_setting(conn, "lastfm_user").strip()
     if lastfm_user:
-        links.append(("Last.fm の scrobble 履歴", f"https://www.last.fm/user/{url_path_segment(lastfm_user)}/library/music/{url_path_segment(name)}"))
+        links.append(("lastfm", "Last.fm の scrobble 履歴", f"https://www.last.fm/user/{url_path_segment(lastfm_user)}/library/music/{url_path_segment(name)}"))
     flickr_users = [get_app_setting(conn, "flickr_user").strip()]
     if not flickr_users[0]:
         flickr_users = []
@@ -162,7 +162,7 @@ def artist_external_links(conn, name):
     tag = "".join(ch for ch in name.lower() if ch.isalnum())
     if tag:
         for user in flickr_users:
-            links.append(("Flickr の写真（アーティスト名タグ）", f"https://www.flickr.com/photos/{url_path_segment(user)}/tags/{url_path_segment(tag)}/"))
+            links.append(("flickr", "Flickr の写真（アーティスト名タグ）", f"https://www.flickr.com/photos/{url_path_segment(user)}/tags/{url_path_segment(tag)}/"))
     return links
 
 
@@ -2214,8 +2214,12 @@ def page_artist(environ, start_response, artist_ref):
     external_links = artist_external_links(conn, artist["name"])
     conn.close()
     links_html = "".join(
-        f'<a href="{esc(url)}" target="_blank" rel="noopener noreferrer">{esc(label)}</a>'
-        for label, url in external_links
+        f'<a class="artist-external-link" href="{esc(url)}" '
+        f'title="{esc(artist["name"] + " — " + label)}" '
+        f'target="_blank" rel="noopener noreferrer">'
+        f'<img src="/static/icons/{service}.svg" width="24" height="24" '
+        f'alt="{esc(label)}" title="{esc(artist["name"] + " — " + label)}"></a>'
+        for service, label, url in external_links
     )
     items = "".join(
         f"""
@@ -2301,7 +2305,10 @@ def serve_static(start_response, path):
     full = os.path.realpath(os.path.join(static_root, relative))
     if not full.startswith(static_root + os.sep) or not os.path.isfile(full):
         return response_not_found(start_response)
-    content_type = "text/css; charset=utf-8" if full.endswith(".css") else "application/octet-stream"
+    content_type = {
+        ".css": "text/css; charset=utf-8",
+        ".svg": "image/svg+xml",
+    }.get(os.path.splitext(full)[1], "application/octet-stream")
     with open(full, "rb") as f:
         data = f.read()
     start_response("200 OK", [("Content-Type", content_type)])

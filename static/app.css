@@ -631,6 +631,20 @@ a.artist-link:hover {
   margin: 12px 0 24px;
 }
 
+.artist-external-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+}
+
+.artist-external-link:hover,
+.artist-external-link:focus-visible {
+  background: var(--accent-soft);
+}
+
 .empty-state {
   display: grid;
   justify-items: center;

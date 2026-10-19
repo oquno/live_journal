@@ -2,11 +2,23 @@ import io
 import sqlite3
 import tempfile
 import unittest
+from html.parser import HTMLParser
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import quote, urlencode
 
 import app
+
+
+class ExternalLinkParser(HTMLParser):
+    def __init__(self, document):
+        super().__init__()
+        self.images = []
+        self.feed(document)
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "img":
+            self.images.append(dict(attrs))
 
 
 class ArtistLinksTests(unittest.TestCase):
@@ -56,7 +68,13 @@ class ArtistLinksTests(unittest.TestCase):
                 self.assertIn('href="https://www.last.fm/user/listener/library/music/' + quote(self.name, safe="") + '"', response["body"])
                 self.assertIn('href="https://www.flickr.com/photos/12345%40N00/tags/' + quote("青葉acdclive") + '/"', response["body"])
                 self.assertIn('rel="noopener noreferrer"', response["body"])
-                self.assertIn("Last.fm の scrobble 履歴", response["body"])
+                images = ExternalLinkParser(response["body"]).images
+                self.assertEqual([image["src"] for image in images],
+                                 ["/static/icons/lastfm.svg", "/static/icons/flickr.svg"])
+                self.assertEqual([image["alt"] for image in images],
+                                 ["Last.fm の scrobble 履歴", "Flickr の写真（アーティスト名タグ）"])
+                for image in images:
+                    self.assertEqual(image["title"], self.name + " — " + image["alt"])
 
     def test_unconfigured_accounts_hide_links(self):
         body = self.request()["body"]
