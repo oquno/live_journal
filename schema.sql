@@ -1,3 +1,9 @@
+CREATE TABLE IF NOT EXISTS login_attempts (
+  client TEXT PRIMARY KEY,
+  window_start REAL NOT NULL,
+  attempts INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS venues (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL UNIQUE,
@@ -72,12 +78,6 @@ CREATE TABLE IF NOT EXISTS app_settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS login_attempts (
-  client TEXT PRIMARY KEY,
-  window_start REAL NOT NULL,
-  attempts INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS link_candidates (

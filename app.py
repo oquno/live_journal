@@ -13,6 +13,7 @@ from calendar import monthrange
 from datetime import datetime, timezone
 from http import cookies
 from email.utils import parsedate_to_datetime
+from login_throttle import reserve_attempt
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -20,7 +21,6 @@ from wsgiref.simple_server import make_server
 import xml.etree.ElementTree as ET
 
 from stats import load_stats, stats_period
-from login_throttle import reserve_attempt
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
