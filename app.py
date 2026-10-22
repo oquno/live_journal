@@ -1,12 +1,10 @@
 import html
 import hashlib
 import hmac
-import ipaddress
 import json
 import os
 import re
 import secrets
-import socket
 import sqlite3
 import unicodedata
 from calendar import monthrange
@@ -14,8 +12,9 @@ from datetime import datetime, timezone
 from http import cookies
 from email.utils import parsedate_to_datetime
 from urllib.error import HTTPError, URLError
+from external_http import PublicHTTPHandler, PublicHTTPSHandler, public_addresses
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 from wsgiref.simple_server import make_server
 import xml.etree.ElementTree as ET
 
@@ -225,23 +224,10 @@ def external_url_allowed(value):
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         return False
     try:
-        addresses = {
-            info[4][0]
-            for info in socket.getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80))
-        }
-    except socket.gaierror:
+        public_addresses(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80))
+    except (OSError, ValueError):
         return False
-    return all(
-        not (
-            ipaddress.ip_address(address).is_private
-            or ipaddress.ip_address(address).is_loopback
-            or ipaddress.ip_address(address).is_link_local
-            or ipaddress.ip_address(address).is_multicast
-            or ipaddress.ip_address(address).is_reserved
-            or ipaddress.ip_address(address).is_unspecified
-        )
-        for address in addresses
-    )
+    return True
 
 
 class SafeRedirectHandler(HTTPRedirectHandler):
@@ -251,7 +237,9 @@ class SafeRedirectHandler(HTTPRedirectHandler):
         return super().redirect_request(request, file, code, message, headers, new_url)
 
 
-SAFE_EXTERNAL_OPENER = build_opener(SafeRedirectHandler)
+# A generic proxy resolves hosts itself and cannot enforce our checked IPs.
+SAFE_EXTERNAL_OPENER = build_opener(ProxyHandler({}), SafeRedirectHandler,
+                                  PublicHTTPHandler, PublicHTTPSHandler)
 
 
 def fetch_external_bytes(url):
