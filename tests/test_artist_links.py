@@ -23,6 +23,7 @@ class ExternalLinkParser(HTMLParser):
 
 class ArtistLinksTests(unittest.TestCase):
     def setUp(self):
+        self.enterContext(patch.object(app, "ADMIN_PASSWORD", "test-password"))
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.path = str(Path(temp.name, "journal.sqlite"))

@@ -12,6 +12,7 @@ from stats import load_stats, stats_period
 
 class StatsTests(unittest.TestCase):
     def setUp(self):
+        self.enterContext(patch.object(app, "ADMIN_PASSWORD", "test-password"))
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.path = str(Path(self.temp.name) / "stats.sqlite")
@@ -115,7 +116,7 @@ class StatsTests(unittest.TestCase):
         private = self.request(mode="private")
         self.assertEqual(private["status"], "303 See Other")
         self.assertEqual(private["headers"]["Location"], "/login")
-        with patch.object(app, "SESSION_SECRET", "test-secret"):
+        with patch.object(app, "SESSION_SECRET", "test-secret"), patch.object(app, "DB_PATH", self.path):
             token = app.sign_session(app.ADMIN_USER)
         private = self.request(mode="private", cookie=f"live_journal_session={token}")
         self.assertEqual(private["status"], "200 OK")
