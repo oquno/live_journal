@@ -497,10 +497,34 @@ def link_candidate_matches(conn, event_date, event_title, venue):
     return sorted(matches, key=lambda item: (-item["score"], item["title"]))[:100]
 
 
+MAX_FORM_BYTES = 1024 * 1024
+MAX_FORM_FIELDS = 1000
+
+
+class InvalidRequestBody(Exception):
+    def __init__(self, status):
+        self.status = status
+
+
 def parse_body(environ):
-    length = int(environ.get("CONTENT_LENGTH") or 0)
-    raw = environ["wsgi.input"].read(length).decode("utf-8")
-    return parse_qs(raw, keep_blank_values=True)
+    value = environ.get("CONTENT_LENGTH", "")
+    if not value:
+        raise InvalidRequestBody("411 Length Required")
+    if not value.isascii() or not value.isdigit():
+        raise InvalidRequestBody("400 Bad Request")
+    # Check the number of digits before converting an attacker-controlled integer.
+    normalized = value.lstrip("0") or "0"
+    if len(normalized) > len(str(MAX_FORM_BYTES)) or int(normalized) > MAX_FORM_BYTES:
+        raise InvalidRequestBody("413 Content Too Large")
+    length = int(normalized)
+    raw = environ["wsgi.input"].read(length)
+    if len(raw) != length:
+        raise InvalidRequestBody("400 Bad Request")
+    try:
+        return parse_qs(raw.decode("utf-8"), keep_blank_values=True,
+                        max_num_fields=MAX_FORM_FIELDS, errors="strict")
+    except (UnicodeError, ValueError):
+        raise InvalidRequestBody("400 Bad Request") from None
 
 
 def parse_query(environ):
@@ -2325,6 +2349,13 @@ def serve_static(start_response, path):
 
 
 def application(environ, start_response):
+    try:
+        return dispatch_request(environ, start_response)
+    except InvalidRequestBody as error:
+        return response_html(start_response, "<h1>" + error.status + "</h1>", error.status)
+
+
+def dispatch_request(environ, start_response):
     path = environ.get("PATH_INFO", "")
     method = environ.get("REQUEST_METHOD", "GET")
 
