@@ -21,6 +21,7 @@ from wsgiref.simple_server import make_server
 import xml.etree.ElementTree as ET
 
 from stats import load_stats, stats_period
+import session_store
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -588,19 +589,21 @@ def parse_cookies(environ):
 
 
 def sign_session(username):
-    payload = username.encode("utf-8")
-    sig = hmac.new(SESSION_SECRET.encode("utf-8"), payload, hashlib.sha256).hexdigest()
-    return f"{username}:{sig}"
+    if username != ADMIN_USER:
+        raise ValueError("Unknown administrator")
+    conn = get_db()
+    try:
+        return session_store.issue(conn, username, ADMIN_PASSWORD, SESSION_SECRET)
+    finally:
+        conn.close()
 
 
 def verify_session(token):
-    if ":" not in token:
-        return None
-    username, sig = token.split(":", 1)
-    expected = hmac.new(SESSION_SECRET.encode("utf-8"), username.encode("utf-8"), hashlib.sha256).hexdigest()
-    if hmac.compare_digest(sig, expected):
-        return username
-    return None
+    conn = get_db()
+    try:
+        return session_store.verify(conn, token, ADMIN_USER, ADMIN_PASSWORD, SESSION_SECRET)
+    finally:
+        conn.close()
 
 
 def session_cookie_value(environ):
@@ -1711,6 +1714,11 @@ def handle_logout(environ, start_response):
     params = parse_body(environ)
     if is_authenticated(environ) and not verify_csrf(environ, params):
         return response_forbidden(start_response)
+    conn = get_db()
+    try:
+        session_store.revoke(conn, session_cookie_value(environ))
+    finally:
+        conn.close()
     cookie = session_cookie("live_journal_session", "", environ)
     cookie["live_journal_session"]["expires"] = "Thu, 01 Jan 1970 00:00:00 GMT"
     return redirect(start_response, "/login", [("Set-Cookie", cookie.output(header="").strip())])
