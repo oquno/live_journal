@@ -13,6 +13,7 @@ from calendar import monthrange
 from datetime import datetime, timezone
 from http import cookies
 from email.utils import parsedate_to_datetime
+from login_throttle import reserve_attempt
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -1665,6 +1666,14 @@ def page_login(environ, start_response, error=""):
 
 
 def handle_login(environ, start_response):
+    conn = get_db()
+    try:
+        retry_after = reserve_attempt(conn, environ.get("REMOTE_ADDR", ""))
+    finally:
+        conn.close()
+    if retry_after:
+        return response_html(start_response, "<h1>ログイン試行が多すぎます。時間をおいて再試行してください。</h1>",
+                             "429 Too Many Requests", [("Retry-After", str(retry_after))])
     params = parse_body(environ)
     username = first(params, "username")
     password = first(params, "password")
