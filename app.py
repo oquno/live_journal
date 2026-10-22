@@ -6,6 +6,7 @@ import json
 import os
 import re
 import secrets
+import session_store
 import socket
 import sqlite3
 import unicodedata
@@ -20,7 +21,6 @@ from wsgiref.simple_server import make_server
 import xml.etree.ElementTree as ET
 
 from stats import load_stats, stats_period
-import session_store
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
