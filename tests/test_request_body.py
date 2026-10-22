@@ -1,4 +1,7 @@
 import io
+import sqlite3
+import tempfile
+from pathlib import Path
 import unittest
 from unittest.mock import Mock, patch
 
@@ -6,6 +9,14 @@ import app
 
 
 class RequestBodyTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        path = str(Path(temp.name, 'journal.db'))
+        self.enterContext(patch.object(app, 'DB_PATH', path))
+        with sqlite3.connect(path) as conn:
+            conn.executescript(Path(app.BASE_DIR, 'schema.sql').read_text())
+
     def request(self, body=b'', length=None, stream=None):
         result = {}
         env = {'PATH_INFO': '/login', 'REQUEST_METHOD': 'POST',
