@@ -161,8 +161,8 @@ def artist_external_links(conn, name):
                 user = unquote(parts[1])
             if user and user not in flickr_users:
                 flickr_users.append(user)
-    tag = "".join(ch for ch in name.lower() if ch.isalnum())
-    if tag:
+    tag = name.strip()
+    if tag and url_path_segment(tag):
         for user in flickr_users:
             links.append(("flickr", "Flickr の写真（アーティスト名タグ）", f"https://www.flickr.com/photos/{url_path_segment(user)}/tags/{url_path_segment(tag)}/"))
     return links
@@ -373,7 +373,7 @@ def flickr_candidates(source, api_key=None):
         title = flickr_text(photoset.get("title", "")).strip()
         if not set_id or not title:
             continue
-        url = f"{account_url}/sets/{set_id}" if account_url else f"https://www.flickr.com/photos/{user_id}/sets/{set_id}"
+        url = f"https://www.flickr.com/photos/{url_path_segment(user_id)}/sets/{url_path_segment(set_id)}"
         candidates.append(
             {
                 "external_id": set_id,
@@ -548,7 +548,8 @@ def esc(value):
 
 
 def url_path_segment(value):
-    return quote("" if value is None else str(value), safe="")
+    value = "" if value is None else str(value)
+    return "" if value in (".", "..") else quote(value, safe="")
 
 
 def decode_path_segment(value):
@@ -837,11 +838,11 @@ def render_entry_card(row):
     if row["artist_items"]:
         artist_links = []
         for item in row["artist_items"].split("||"):
-            name, _, slug = item.partition("\t")
+            name, _, artist_id = item.partition("\t")
             if not name:
                 continue
             artist_links.append(
-                f'<a class="typed-link artist-link" href="/artists/{url_path_segment(slug)}">'
+                f'<a class="typed-link artist-link" href="/artists/{artist_id}/{url_path_segment(name)}">'
                 f'{icon("mic")}{esc(name)}</a>'
             )
         artists = " ".join(artist_links)
@@ -1403,7 +1404,7 @@ def list_entries(conn, params, limit=None, offset=0):
     return conn.execute(
         f"""
         SELECT e.id, e.event_date, e.title, e.notes, e.venue_id, v.name AS venue_name, v.slug AS venue_slug,
-               GROUP_CONCAT(a.name || CHAR(9) || a.slug, '||') AS artist_items
+               GROUP_CONCAT(a.name || CHAR(9) || a.id, '||') AS artist_items
         FROM entries e
         JOIN venues v ON v.id = e.venue_id
         LEFT JOIN entry_artists ea ON ea.entry_id = e.id
@@ -2109,7 +2110,7 @@ def page_entry_detail(environ, start_response, entry_id):
     artists = "".join(
         f"""
         <li>
-          <a class="typed-link artist-link" href="/artists/{url_path_segment(row['slug'])}">{icon('mic')}{esc(row['name'])}</a>
+          <a class="typed-link artist-link" href="/artists/{row['id']}/{url_path_segment(row['name'])}">{icon('mic')}{esc(row['name'])}</a>
           <span class="pill">{row['seen_count']}回目</span>
           {'<a href="' + esc(safe_external_url(row['lastfm_url'])) + '" target="_blank" rel="noreferrer">Last.fm</a>' if safe_external_url(row['lastfm_url']) else ''}
         </li>
@@ -2286,7 +2287,7 @@ def page_artist(environ, start_response, artist_ref):
     return response_html(start_response, layout(
         artist["name"], body, environ,
         description=f"{artist['name']}を見たライブの記録。観覧回数 {len(rows):,}回。日付・会場とともに振り返る。",
-        canonical_path=f"/artists/{url_path_segment(artist['slug'])}",
+        canonical_path=f"/artists/{artist['id']}/{url_path_segment(artist['name'])}",
     ))
 
 
@@ -2431,6 +2432,8 @@ def dispatch_request(environ, start_response):
             return handle_delete_link_source(environ, start_response, int(parts[2]))
         except ValueError:
             return response_not_found(start_response)
+    if len(parts) >= 3 and parts[0] == "artists" and parts[1].isdigit() and method == "GET":
+        return page_artist(environ, start_response, parts[1])
     if len(parts) == 2 and parts[0] == "artists" and method == "GET":
         return page_artist(environ, start_response, decode_path_segment(parts[1]))
     if len(parts) == 2 and parts[0] == "venues" and method == "GET":

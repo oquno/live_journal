@@ -123,7 +123,8 @@ class MetadataTests(unittest.TestCase):
         for kind, slug in (("artists", "音楽"), ("venues", "京都")):
             with self.subTest(kind=kind):
                 alias = self.request(f"/{kind}/1")["head"]
-                canonical = "https://live.example.com/" + kind + "/" + quote(slug, safe="")
+                canonical = ("https://live.example.com/artists/1/" + quote('演者 <&> "音楽"', safe="")
+                             if kind == "artists" else "https://live.example.com/venues/" + quote(slug, safe=""))
                 self.assertEqual(alias.canonical, canonical)
                 self.assertEqual(self.request(f"/{kind}/{quote(slug)}")["head"].canonical, canonical)
 

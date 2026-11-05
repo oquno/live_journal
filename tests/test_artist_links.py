@@ -67,7 +67,7 @@ class ArtistLinksTests(unittest.TestCase):
                 response = self.request(path)
                 self.assertEqual(response["status"], "200 OK")
                 self.assertIn('href="https://www.last.fm/user/listener/library/music/' + quote(self.name, safe="") + '"', response["body"])
-                self.assertIn('href="https://www.flickr.com/photos/12345%40N00/tags/' + quote("青葉acdclive") + '/"', response["body"])
+                self.assertIn('href="https://www.flickr.com/photos/12345%40N00/tags/' + quote(self.name.strip(), safe="") + '/"', response["body"])
                 self.assertIn('rel="noopener noreferrer"', response["body"])
                 images = ExternalLinkParser(response["body"]).images
                 self.assertEqual([image["src"] for image in images],
@@ -76,6 +76,11 @@ class ArtistLinksTests(unittest.TestCase):
                                  ["Last.fm の scrobble 履歴", "Flickr の写真（アーティスト名タグ）"])
                 for image in images:
                     self.assertEqual(image["title"], self.name + " — " + image["alt"])
+
+    def test_flickr_preserves_symbols_in_artist_tag(self):
+        self.set_accounts()
+        links = app.artist_external_links(self.conn, "∈Y∋ ")
+        self.assertEqual(links[-1][2], "https://www.flickr.com/photos/12345%40N00/tags/" + quote("∈Y∋", safe="") + "/")
 
     def test_unconfigured_accounts_hide_links(self):
         body = self.request()["body"]
